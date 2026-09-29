@@ -25,6 +25,22 @@ pub const PORTABLE_DIR: &str = "oxtail-data";
 /// Name of the marker file that enables portable mode.
 pub const PORTABLE_MARKER: &str = "portable";
 
+/// Name of the spool sub-folder inside the data folder. OxTail-specific on
+/// purpose: `--data-dir` may point at any folder (even `~`), so a generic
+/// `tmp/` could belong to the user.
+pub const SPOOL_DIR: &str = ".oxtail-spool";
+/// File-name prefix of spool files. Only regular files in [`SPOOL_DIR`] whose
+/// name starts with this prefix are ever deleted by
+/// [`DataDir::cleanup_stale_temp`]; name spools `oxtail-spool-*`.
+pub const SPOOL_PREFIX: &str = "oxtail-spool-";
+/// File-name prefix of the writability probe files.
+const PROBE_PREFIX: &str = ".oxtail-probe-";
+
+/// `true` if `name` is a spool file name (`oxtail-spool-*`).
+pub fn is_spool_name(name: &str) -> bool {
+    name.starts_with(SPOOL_PREFIX)
+}
+
 /// How the data folder was chosen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DataMode {
@@ -83,7 +99,7 @@ pub struct DataDir {
 
 impl DataDir {
     /// Resolves the data folder and makes sure `profiles/`, `themes/` and
-    /// `tmp/` exist. Never fails: problems become [`DataMode::InMemory`].
+    /// `.oxtail-spool/` exist. Never fails: problems become [`DataMode::InMemory`].
     pub fn resolve(input: ResolveInput) -> DataDir {
         if let Some(p) = input.cli_override {
             return Self::prepare(p, DataMode::Cli);
@@ -169,9 +185,10 @@ impl DataDir {
     pub fn themes_dir(&self) -> Option<PathBuf> {
         self.sub("themes")
     }
-    /// `tmp/`, for spool files.
+    /// `.oxtail-spool/` ([`SPOOL_DIR`]), for spool files named
+    /// `oxtail-spool-*` ([`SPOOL_PREFIX`]).
     pub fn tmp_dir(&self) -> Option<PathBuf> {
-        self.sub("tmp")
+        self.sub(SPOOL_DIR)
     }
 
     /// A stable identifier derived from the data folder, for naming the
@@ -191,12 +208,14 @@ impl DataDir {
         format!("{h:016x}")
     }
 
-    /// Deletes leftovers of crashed runs: everything in `tmp/` and dangling
-    /// atomic-write temporaries (`*.oxtail-tmp`) in the data folder and its
-    /// `profiles/` and `themes/`. Returns the number of entries removed.
+    /// Deletes leftovers of crashed runs: regular files named `oxtail-spool-*`
+    /// in the spool folder, dangling atomic-write temporaries (`*.oxtail-tmp`)
+    /// and `.oxtail-probe-*` files in the data folder and its `profiles/` and
+    /// `themes/`. Never deletes directories or files with other names, so it
+    /// is safe even when `--data-dir` points at a folder the user owns.
+    /// Returns the number of entries removed.
     ///
-    /// Call once at startup, after the single-instance lock is held: no other
-    /// live OxTail uses this folder then, so everything in `tmp/` is stale.
+    /// Call once at startup, after the single-instance lock is held.
     pub fn cleanup_stale_temp(&self) -> usize {
         let mut removed = 0;
         if let Some(tmp) = self.tmp_dir()
@@ -204,12 +223,11 @@ impl DataDir {
         {
             for e in rd.flatten() {
                 let p = e.path();
-                let ok = if e.file_type().is_ok_and(|t| t.is_dir()) {
-                    fs::remove_dir_all(&p)
-                } else {
-                    fs::remove_file(&p)
-                };
-                match ok {
+                let is_file = e.file_type().is_ok_and(|t| t.is_file());
+                if !is_file || !is_spool_name(&e.file_name().to_string_lossy()) {
+                    continue;
+                }
+                match fs::remove_file(&p) {
                     Ok(()) => removed += 1,
                     Err(err) => tracing::warn!("cannot remove {}: {err}", p.display()),
                 }
@@ -222,7 +240,10 @@ impl DataDir {
             let Ok(rd) = fs::read_dir(&dir) else { continue };
             for e in rd.flatten() {
                 let name = e.file_name();
-                if name.to_string_lossy().ends_with(TEMP_SUFFIX)
+                let name = name.to_string_lossy();
+                let stale = name.ends_with(TEMP_SUFFIX) || name.starts_with(PROBE_PREFIX);
+                if stale
+                    && e.file_type().is_ok_and(|t| t.is_file())
                     && fs::remove_file(e.path()).is_ok()
                 {
                     removed += 1;
@@ -240,7 +261,7 @@ fn is_translocated(exe: &Path) -> bool {
 }
 
 fn ensure_layout(root: &Path) -> io::Result<()> {
-    for sub in ["", "profiles", "themes", "tmp"] {
+    for sub in ["", "profiles", "themes", SPOOL_DIR] {
         fs::create_dir_all(root.join(sub))?;
     }
     probe_writable(root)
@@ -248,7 +269,7 @@ fn ensure_layout(root: &Path) -> io::Result<()> {
 
 /// Creates and removes a probe file in `dir`.
 fn probe_writable(dir: &Path) -> io::Result<()> {
-    let probe = dir.join(format!(".oxtail-probe-{}", std::process::id()));
+    let probe = dir.join(format!("{PROBE_PREFIX}{}", std::process::id()));
     let mut f = fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -284,7 +305,7 @@ mod tests {
         });
         assert_eq!(d.mode, DataMode::Cli);
         assert_eq!(d.root.as_deref(), Some(cli.as_path()));
-        for s in ["profiles", "themes", "tmp"] {
+        for s in ["profiles", "themes", SPOOL_DIR] {
             assert!(cli.join(s).is_dir(), "{s}");
         }
     }
@@ -375,8 +396,8 @@ mod tests {
             installed_dir: None,
         });
         let root = d.root.clone().expect("root");
-        fs::write(d.tmp_dir().expect("tmp").join("spool-1.bin"), "x").expect("w");
-        fs::create_dir(d.tmp_dir().expect("tmp").join("sub")).expect("mkdir");
+        fs::write(d.tmp_dir().expect("tmp").join("oxtail-spool-1.bin"), "x").expect("w");
+        fs::write(root.join(format!("{PROBE_PREFIX}99")), "x").expect("w");
         fs::write(root.join(format!(".settings.toml.1.0{TEMP_SUFFIX}")), "x").expect("w");
         fs::write(root.join("settings.toml"), "keep").expect("w");
         assert_eq!(d.cleanup_stale_temp(), 3);
@@ -385,6 +406,33 @@ mod tests {
             fs::read_dir(d.tmp_dir().expect("tmp")).expect("rd").count(),
             0
         );
+        assert!(!root.join(format!("{PROBE_PREFIX}99")).exists());
+    }
+
+    #[test]
+    fn cleanup_never_touches_user_tmp() {
+        let t = tempfile::tempdir().expect("tempdir");
+        let home = t.path().join("home");
+        fs::create_dir_all(home.join("tmp/subdir")).expect("mkdir");
+        fs::write(home.join("tmp/important.txt"), "keep").expect("w");
+        fs::write(home.join("tmp/subdir/deep.txt"), "keep").expect("w");
+        let d = DataDir::resolve(ResolveInput {
+            cli_override: Some(home.clone()),
+            exe_path: PathBuf::new(),
+            installed_dir: None,
+        });
+        // Non-spool files and directories inside the spool folder survive too.
+        let spool = d.tmp_dir().expect("spool");
+        fs::write(spool.join("user.txt"), "keep").expect("w");
+        fs::create_dir(spool.join("oxtail-spool-dir")).expect("mkdir");
+        d.cleanup_stale_temp();
+        assert_eq!(
+            fs::read_to_string(home.join("tmp/important.txt")).expect("r"),
+            "keep"
+        );
+        assert!(home.join("tmp/subdir/deep.txt").exists());
+        assert!(spool.join("user.txt").exists());
+        assert!(spool.join("oxtail-spool-dir").is_dir());
     }
 
     #[test]
