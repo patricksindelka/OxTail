@@ -307,7 +307,7 @@ pub enum DocEvent {
 type Waker = Arc<dyn Fn() + Send + Sync>;
 
 enum Cmd {
-    Lines(RequestId, LineRequest),
+    Lines(RequestId, u64, LineRequest),
     Poke,
     SetEncoding(EncodingChoice),
     Shutdown,
@@ -663,9 +663,22 @@ impl Document {
 
     /// Queues a request; the answer arrives as [`DocEvent::Lines`] with the
     /// returned id. Never blocks.
+    ///
+    /// The request is bound to the generation current *now*: if the file is
+    /// truncated, rotated or re-decoded before the actor gets to it, the
+    /// answer is empty and tagged with this (old) generation, so the caller
+    /// drops it like any other stale result.
     pub fn request_lines(&self, req: LineRequest) -> RequestId {
+        self.request_lines_in(self.generation(), req)
+    }
+
+    /// Like [`Document::request_lines`], but bound to `generation` (the one
+    /// the request's offsets or line numbers were computed in, e.g. by a
+    /// search worker). If the document has moved on by the time the actor
+    /// serves it, the answer is empty and tagged with `generation`.
+    pub fn request_lines_in(&self, generation: u64, req: LineRequest) -> RequestId {
         let id = RequestId(self.next_id.fetch_add(1, Ordering::Relaxed));
-        let _ = self.tx.send(Cmd::Lines(id, req));
+        let _ = self.tx.send(Cmd::Lines(id, generation, req));
         id
     }
 
@@ -926,7 +939,15 @@ impl Actor {
                     self.poll_deadline = Some(self.last_poll + MIN_POLL_GAP);
                 }
             }
-            Cmd::Lines(id, req) => {
+            Cmd::Lines(id, requested_gen, req) => {
+                if requested_gen != self.shared.generation.load(Ordering::Acquire) {
+                    self.shared.emit(DocEvent::Lines {
+                        id,
+                        generation: requested_gen,
+                        lines: Vec::new(),
+                    });
+                    return true;
+                }
                 let lines = match self.shared.read_request(&req) {
                     Ok(l) => l,
                     Err(e) => {
@@ -937,7 +958,7 @@ impl Actor {
                 };
                 self.shared.emit(DocEvent::Lines {
                     id,
-                    generation: self.shared.generation.load(Ordering::Acquire),
+                    generation: requested_gen,
                     lines,
                 });
             }

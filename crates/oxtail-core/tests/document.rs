@@ -565,3 +565,26 @@ fn approximate_numbers_before_indexing_completes() {
     assert_eq!(t[0].number, 174_761);
     assert_eq!(doc.snapshot().state, DocState::Ready);
 }
+
+#[test]
+fn request_from_an_old_generation_gets_an_empty_answer_tagged_old() {
+    let src = Arc::new(MemSource::new(b"aaaa\nbbbb\ncccc\n".to_vec()));
+    let doc = Document::from_source_with(src.clone(), "mem", small_opts());
+    wait_ready(&doc, 15);
+    let g0 = doc.generation();
+    src.replace(b"zz\nyyyyyyyy\n".to_vec());
+    doc.refresh();
+    wait_ready(&doc, 12);
+    assert!(doc.generation() > g0);
+    // Offsets 5 and 10 belonged to the old content; they must not be resolved
+    // against the new content and tagged as current.
+    let id = doc.request_lines_in(g0, LineRequest::AtOffsets(vec![5, 10]));
+    let (g, lines) = wait_lines(&doc, id);
+    assert_eq!(g, g0);
+    assert!(lines.is_empty(), "{lines:?}");
+    // A request made now is answered in the current generation.
+    let id = doc.request_lines(LineRequest::Range { first: 0, count: 5 });
+    let (g, lines) = wait_lines(&doc, id);
+    assert_eq!(g, doc.generation());
+    assert_eq!(texts(&lines), ["zz", "yyyyyyyy"]);
+}
