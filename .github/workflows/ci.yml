@@ -57,7 +57,7 @@ jobs:
     # cargo-fuzz needs nightly (sanitizer flags). The build must pass.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
@@ -90,7 +90,7 @@ jobs:
           - columns_detect
           - columns_query
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
@@ -100,7 +100,7 @@ jobs:
         working-directory: fuzz
         continue-on-error: true
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=30 -rss_limit_mb=2048
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: fuzz-artifacts-${{ matrix.target }}

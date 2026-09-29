@@ -1,0 +1,5 @@
+# cargo-fuzz needs nightly (sanitizer flags). This overrides the pinned stable
+# toolchain from the repository root for everything under fuzz/.
+[toolchain]
+channel = "nightly"
+profile = "minimal"
