@@ -6,11 +6,11 @@
 //! not fit the format simply yields `None`.
 
 mod builtin;
-mod delimited;
+pub(crate) mod delimited;
 mod fixed;
 mod json;
 mod log4j;
-mod logfmt;
+pub(crate) mod logfmt;
 mod regex_parser;
 
 use std::collections::BTreeMap;
