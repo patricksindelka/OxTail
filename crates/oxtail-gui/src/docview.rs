@@ -1908,7 +1908,12 @@ mod tests {
     fn selection_and_copy_of_cached_lines() {
         let (doc, _mem) = doc_with(50);
         let mut v = DocView::new(doc, &init(false));
-        run_until(&mut v, |_, vis| vis.rows.len() == 10);
+        // Wait for exact numbers too: rows can arrive before indexing finishes
+        // (seen on slower Windows CI runners), and the selection count reports
+        // whether its numbers are exact.
+        run_until(&mut v, |_, vis| {
+            vis.rows.len() == 10 && vis.rows.iter().all(|r| r.line.number_exact)
+        });
         let a = v.last_rows[2].clone();
         let b = v.last_rows[4].clone();
         v.select(&a, false);
@@ -2038,7 +2043,11 @@ mod tests {
                 ..ViewInit::default()
             },
         );
-        let vis = run_until(&mut v, |_, vis| vis.rows.len() == 10);
+        // Rows from the top can arrive before the tail answer repositions the
+        // view (seen on slower Windows CI runners); wait for the final position.
+        let vis = run_until(&mut v, |_, vis| {
+            vis.rows.len() == 10 && vis.rows.first().is_some_and(|r| r.line.number == 450)
+        });
         assert_eq!(numbers(&vis)[0], 450);
         assert!(!v.follow);
         // Scrolling to the end resumes following.
