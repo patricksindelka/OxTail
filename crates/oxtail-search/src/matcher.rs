@@ -23,7 +23,10 @@
 //!
 //! Literals: the match must not be preceded or followed by a word character
 //! (Unicode alphanumeric or `_`), like `grep -w`. Regexes: the pattern is
-//! wrapped as `\b(?:pattern)\b`.
+//! wrapped as `\b{start-half}(?:pattern)\b{end-half}`, i.e. the text before and
+//! after the match must not be a word character. This is `grep -w` semantics
+//! and, unlike `\b...\b`, also works for patterns that start or end with
+//! punctuation (`\-v`, `foo\.`).
 
 use std::ops::Range;
 
@@ -388,7 +391,7 @@ fn compile_regex(query: &Query) -> Result<Matcher, SearchError> {
         CaseMode::Smart => !has_uppercase_literal(pat),
     };
     let source = if query.whole_word {
-        format!(r"\b(?:{pat})\b")
+        format!(r"\b{{start-half}}(?:{pat})\b{{end-half}}")
     } else {
         pat.to_owned()
     };
@@ -498,6 +501,30 @@ mod tests {
         let m = Matcher::compile(&q).unwrap();
         assert!(m.is_match(b"a cat sat"));
         assert!(!m.is_match(b"concatenate"));
+    }
+
+    #[test]
+    fn whole_word_regex_with_punctuation_edges() {
+        let ww = |p: &str, l: &str| {
+            let m = Matcher::compile(&Query::regex(p).with_whole_word(true)).unwrap();
+            let lit = Matcher::compile(&Query::literal(p.replace('\\', "")).with_whole_word(true))
+                .unwrap();
+            let r = m.is_match(l.as_bytes());
+            assert_eq!(r, lit.is_match(l.as_bytes()), "{p:?} in {l:?} vs literal");
+            r
+        };
+        assert!(ww(r"\-v", "cmd -v x"));
+        assert!(ww(r"foo\.", "a foo. b"));
+        assert!(ww(r"\(x\)", "call (x) now"));
+        assert!(!ww(r"\-v", "cmd a-v x"));
+        assert!(!ww(r"foo\.", "afoo. b"));
+        assert!(ww(r"cat", "a cat sat"));
+        assert!(!ww(r"cat", "concatenate"));
+        assert!(!ww(r"cat", "cat_food"));
+        assert!(ww(r"cat", "cat"));
+        // In the whole-buffer scan too.
+        let m = Matcher::compile(&Query::regex(r"\-v").with_whole_word(true)).unwrap();
+        assert_eq!(lines(&m, b"no\ncmd -v x\nnope-v\n"), vec![(3, 11)]);
     }
 
     #[test]

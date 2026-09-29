@@ -181,7 +181,9 @@ fn apply_sgr(style: &mut Style, params: &[u8]) {
                         Some(2) => 4,
                         _ => rest.len().min(1),
                     };
-                    let c = extended_color(&rest);
+                    // Only the params this form consumes: trailing ones are
+                    // separate attributes (`38;2;r;g;b;1` is colour + bold).
+                    let c = extended_color(&rest[..used.min(rest.len())]);
                     gi = (gi + used).min(groups.len());
                     c
                 };
@@ -258,6 +260,25 @@ mod tests {
 
     fn red() -> Style {
         Style::fg(ColorRef::solid(SemanticColor::Error))
+    }
+
+    #[test]
+    fn extended_colour_followed_by_more_params() {
+        let rgb = |r, g, b| Style::fg(ColorRef::rgb(r, g, b));
+        // `;` form: trailing params are separate attributes.
+        let (_, s) = parse("\x1b[38;2;255;0;0;1mX");
+        assert_eq!(s, vec![span(0..1, rgb(255, 0, 0).bold())]);
+        let (_, s) = parse("\x1b[38;5;196;1mX");
+        assert_eq!(s, vec![span(0..1, Style::fg(ansi256(196)).bold())]);
+        let (_, s) = parse("\x1b[38;2;1;2;3;4;5mX");
+        assert_eq!(s, vec![span(0..1, rgb(1, 2, 3).underline())]);
+        // Colon form, with and without a colour-space id.
+        let (_, s) = parse("\x1b[38:2:10:20:30mX");
+        assert_eq!(s, vec![span(0..1, rgb(10, 20, 30))]);
+        let (_, s) = parse("\x1b[38:2:0:10:20:30mX");
+        assert_eq!(s, vec![span(0..1, rgb(10, 20, 30))]);
+        let (_, s) = parse("\x1b[38:2::10:20:30;1mX");
+        assert_eq!(s, vec![span(0..1, rgb(10, 20, 30).bold())]);
     }
 
     #[test]

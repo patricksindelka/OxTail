@@ -323,6 +323,9 @@ impl CompiledRules {
         if let Some(ac) = &self.literals {
             let bytes = line.as_bytes();
             let mut hits: Vec<(usize, Range<usize>)> = Vec::new();
+            // Ranges are collected per rule up to a cap, but the scan goes on
+            // so every rule that occurs at all is still recorded.
+            let mut counts = vec![0usize; self.rules.len()];
             for m in ac.find_overlapping_iter(bytes) {
                 let ri = self.literal_rules[m.pattern().as_usize()];
                 let range = m.range();
@@ -331,9 +334,9 @@ impl CompiledRules {
                 {
                     continue;
                 }
-                hits.push((ri, range));
-                if hits.len() >= MAX_PAINTS {
-                    break;
+                if counts[ri] < MAX_MATCHES_PER_RULE {
+                    counts[ri] += 1;
+                    hits.push((ri, range));
                 }
             }
             hits.sort_by_key(|(ri, r)| (*ri, r.start));
@@ -402,7 +405,10 @@ impl CompiledRules {
         let rule = &self.rules[ri];
         let is_column_rule = matches!(rule.body, Body::Column(_));
         let mut paint = |range: Range<usize>| {
-            if !range.is_empty() && !rule.style.is_empty() && acc.paints.len() < MAX_PAINTS {
+            if !range.is_empty() && !rule.style.is_empty() {
+                if acc.paints.len() >= 4 * MAX_PAINTS {
+                    prune_paints(&mut acc.paints);
+                }
                 acc.paints.push(Paint {
                     priority: rule.priority,
                     order: ri,
@@ -570,10 +576,20 @@ fn find_column<'a>(
 }
 
 /// Layers overlapping paints into sorted, non-overlapping spans.
+/// Keeps the [`MAX_PAINTS`] paints with the highest (priority, order): the
+/// budget goes to the paints that would win, not to whichever rule ran first.
+fn prune_paints(paints: &mut Vec<Paint>) {
+    if paints.len() > MAX_PAINTS {
+        paints.sort_unstable_by_key(|p| std::cmp::Reverse((p.priority, p.order)));
+        paints.truncate(MAX_PAINTS);
+    }
+}
+
 fn compose(mut paints: Vec<Paint>) -> Vec<StyledSpan> {
     if paints.is_empty() {
         return Vec::new();
     }
+    prune_paints(&mut paints);
     paints.sort_by_key(|p| (p.priority, p.order));
     let mut bounds: Vec<usize> = paints
         .iter()
@@ -708,6 +724,63 @@ mod tests {
 
     fn ranges(h: &LineHighlight) -> Vec<Range<usize>> {
         h.spans.iter().map(|s| s.range.clone()).collect()
+    }
+
+    #[test]
+    fn many_hits_of_one_rule_do_not_hide_later_rules() {
+        let rules = compile(vec![
+            Rule::literal("eq", "=").styled(fg(S::Info)),
+            Rule::literal("err", "ERROR")
+                .scoped(Scope::Line)
+                .with_actions(RuleActions {
+                    alert: true,
+                    hide: false,
+                    bookmark: true,
+                })
+                .styled(fg(S::Error)),
+        ]);
+        let line = format!("{}ERROR", "k=v ".repeat(600));
+        let h = rules.highlight(&line, None);
+        assert_eq!(h.matched_rules, vec![0, 1]);
+        assert!(h.alert && h.bookmark);
+        assert!(h.line_style.is_some());
+        assert_eq!(h.spans.len(), MAX_MATCHES_PER_RULE);
+    }
+
+    #[test]
+    fn paint_budget_goes_to_highest_priority() {
+        // Three low-priority rules with 200 matches each exhaust 512 paints
+        // in processing order; the later, high-priority regex must survive.
+        let mut rules = Vec::new();
+        for (i, c) in ["a", "b", "c"].iter().enumerate() {
+            rules.push(
+                Rule::literal(format!("low{i}"), *c)
+                    .styled(fg(S::Info))
+                    .with_priority(0),
+            );
+        }
+        rules.push(
+            Rule::regex("hi", "ERROR")
+                .styled(fg(S::Error))
+                .with_priority(10),
+        );
+        let rules = compile(rules);
+        let mut line = String::new();
+        for _ in 0..200 {
+            line.push_str("a b c ");
+        }
+        let err_at = line.len();
+        line.push_str("ERROR");
+        let h = rules.highlight(&line, None);
+        assert!(h.matched_rules.contains(&3));
+        assert!(
+            h.spans
+                .iter()
+                .any(|s| s.range == (err_at..err_at + 5) && s.style.fg == fg(S::Error).fg),
+            "high-priority paint was dropped"
+        );
+        // The budget is still respected.
+        assert!(h.spans.len() <= MAX_PAINTS);
     }
 
     #[test]

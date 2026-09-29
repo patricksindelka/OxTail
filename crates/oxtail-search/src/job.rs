@@ -16,8 +16,8 @@
 //! them together with the new chunks.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use oxtail_core::ReadAt;
 use parking_lot::Mutex;
@@ -128,7 +128,6 @@ struct Shared {
     after: u32,
     chunk_size: u64,
     max_matches: u64,
-    threads: usize,
     cancelled: AtomicBool,
     /// Serialises `Extend` tasks.
     extend_lock: Mutex<()>,
@@ -140,7 +139,8 @@ struct Inner {
     epoch: u64,
     slots: Vec<Slot>,
     queue: VecDeque<Task>,
-    active: usize,
+    /// The job is registered in the global round-robin ring.
+    in_ring: bool,
     pending_extends: usize,
     done_count: usize,
     matches: u64,
@@ -152,12 +152,94 @@ struct Inner {
 struct Slot {
     epoch: u64,
     done: bool,
+    /// While not done this holds the already-valid prefix (entries before
+    /// `scan_from`); once done, the complete segment.
     seg: Option<Arc<Segment>>,
+    /// Where the (re)scan of this chunk starts: a line start, or the chunk
+    /// start.
+    scan_from: u64,
 }
 
 enum Task {
-    Scan { chunk: usize, epoch: u64, end: u64 },
+    Scan {
+        chunk: usize,
+        epoch: u64,
+        end: u64,
+        from: u64,
+    },
     Extend(u64),
+}
+
+/// Fair scheduling across jobs: a job with queued tasks sits in the ring, and
+/// each runner takes one task from the job at the front, then rotates that
+/// job to the back. A long filter job therefore cannot starve a later search.
+struct Sched {
+    ring: VecDeque<Arc<Shared>>,
+    runners: usize,
+}
+
+static SCHED: LazyLock<Mutex<Sched>> = LazyLock::new(|| {
+    Mutex::new(Sched {
+        ring: VecDeque::new(),
+        runners: 0,
+    })
+});
+
+fn runner() {
+    loop {
+        let (job, task) = {
+            let mut s = SCHED.lock();
+            let Some(job) = s.ring.pop_front() else {
+                s.runners -= 1;
+                return;
+            };
+            let (task, more) = {
+                let mut g = job.inner.lock();
+                let task = job.next_task(&mut g);
+                let more = task.is_some() && !g.queue.is_empty();
+                if !more {
+                    g.in_ring = false;
+                }
+                (task, more)
+            };
+            if more {
+                s.ring.push_back(Arc::clone(&job));
+            }
+            (job, task)
+        };
+        match task {
+            Some(Task::Scan {
+                chunk,
+                epoch,
+                end,
+                from,
+            }) => job.run_scan(chunk, epoch, end, from),
+            Some(Task::Extend(new_end)) => job.run_extend(new_end),
+            None => {}
+        }
+    }
+}
+
+/// `a` followed by `b`; every offset of `b` is greater than those of `a`.
+fn concat_segments(a: &Segment, b: Segment) -> Segment {
+    let mut offsets = a.offsets.clone();
+    offsets.extend_from_slice(&b.offsets);
+    let context = if a.context.is_empty() && b.context.is_empty() {
+        Vec::new()
+    } else {
+        let mut c = if a.context.is_empty() {
+            vec![false; a.offsets.len()]
+        } else {
+            a.context.clone()
+        };
+        if b.context.is_empty() {
+            c.resize(offsets.len(), false);
+        } else {
+            c.extend_from_slice(&b.context);
+        }
+        c
+    };
+    Segment { offsets, context }
 }
 
 fn chunk_count(end: u64, cs: u64) -> usize {
@@ -202,6 +284,7 @@ fn start_job(
             chunk,
             epoch: 0,
             end,
+            from: chunk as u64 * chunk_size,
         })
         .collect();
     let shared = Arc::new(Shared {
@@ -211,21 +294,21 @@ fn start_job(
         after,
         chunk_size,
         max_matches: opts.max_matches,
-        threads: rayon::current_num_threads().max(1),
         cancelled: AtomicBool::new(false),
         extend_lock: Mutex::new(()),
         inner: Mutex::new(Inner {
             end,
             epoch: 0,
             slots: (0..n)
-                .map(|_| Slot {
+                .map(|i| Slot {
                     epoch: 0,
                     done: false,
                     seg: None,
+                    scan_from: i as u64 * chunk_size,
                 })
                 .collect(),
             queue,
-            active: 0,
+            in_ring: false,
             pending_extends: 0,
             done_count: 0,
             matches: 0,
@@ -234,64 +317,64 @@ fn start_job(
             snapshot: None,
         }),
     });
-    let spawn = {
-        let mut g = shared.inner.lock();
-        shared.workers_to_spawn(&mut g)
-    };
-    shared.spawn_workers(spawn);
+    shared.kick();
     SearchHandle { shared }
 }
 
 impl Shared {
-    /// Decides (under the queue lock) how many workers to start.
-    fn workers_to_spawn(&self, g: &mut Inner) -> usize {
-        let want = g.queue.len().min(self.threads);
-        let extra = want.saturating_sub(g.active);
-        g.active += extra;
-        extra
-    }
-
-    fn spawn_workers(self: &Arc<Self>, count: usize) {
-        for _ in 0..count {
-            let me = Arc::clone(self);
-            rayon::spawn(move || me.worker());
+    /// Registers the job in the round-robin ring if it has work and is not
+    /// registered yet, and makes sure enough runners exist.
+    fn kick(self: &Arc<Self>) {
+        {
+            let mut g = self.inner.lock();
+            if g.in_ring || g.queue.is_empty() {
+                return;
+            }
+            g.in_ring = true;
+        }
+        let spawn = {
+            let mut s = SCHED.lock();
+            s.ring.push_back(Arc::clone(self));
+            let max = rayon::current_num_threads().max(1);
+            let extra = max.saturating_sub(s.runners);
+            s.runners += extra;
+            extra
+        };
+        for _ in 0..spawn {
+            rayon::spawn(runner);
         }
     }
 
-    fn worker(self: Arc<Self>) {
-        loop {
-            let task = {
-                let mut g = self.inner.lock();
-                loop {
-                    if self.cancelled.load(Ordering::Relaxed) {
-                        g.active -= 1;
-                        return;
+    /// Pops the next live task (skipping stale ones); `None` when the job is
+    /// cancelled or has nothing left.
+    fn next_task(&self, g: &mut Inner) -> Option<Task> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            g.queue.clear();
+            return None;
+        }
+        while let Some(t) = g.queue.pop_front() {
+            match t {
+                Task::Scan { chunk, epoch, .. } => {
+                    if g.slots.get(chunk).is_some_and(|s| s.epoch == epoch) {
+                        return Some(t);
                     }
-                    match g.queue.pop_front() {
-                        None => {
-                            g.active -= 1;
-                            return;
-                        }
-                        Some(Task::Scan { chunk, epoch, end }) => {
-                            if g.slots.get(chunk).is_some_and(|s| s.epoch == epoch) {
-                                break Task::Scan { chunk, epoch, end };
-                            }
-                            // Stale (superseded by an extend): skip.
-                        }
-                        Some(t @ Task::Extend(_)) => break t,
-                    }
+                    // Stale (superseded by an extend): skip.
                 }
-            };
-            match task {
-                Task::Scan { chunk, epoch, end } => self.run_scan(chunk, epoch, end),
-                Task::Extend(new_end) => self.run_extend(new_end),
+                Task::Extend(_) => return Some(t),
             }
         }
+        None
     }
 
-    fn run_scan(self: &Arc<Self>, chunk: usize, epoch: u64, end: u64) {
-        let a = chunk as u64 * self.chunk_size;
-        let b = (a + self.chunk_size).min(end);
+    /// Drops queued scans (keeping `Extend` tasks, which must still run to
+    /// balance `pending_extends`).
+    fn drop_scans(g: &mut Inner) {
+        g.queue.retain(|t| matches!(t, Task::Extend(_)));
+    }
+
+    fn run_scan(self: &Arc<Self>, chunk: usize, epoch: u64, end: u64, from: u64) {
+        let a = from;
+        let b = (chunk as u64 * self.chunk_size + self.chunk_size).min(end);
         let result = scan_chunk(
             self.source.as_ref(),
             a,
@@ -319,37 +402,50 @@ impl Shared {
         let count = seg.offsets.len() as u64;
         let slot = &mut g.slots[chunk];
         slot.done = true;
-        slot.seg = (count > 0).then(|| Arc::new(seg));
+        let seg = match slot.seg.take() {
+            Some(prefix) if count > 0 => Some(Arc::new(concat_segments(&prefix, seg))),
+            Some(prefix) => Some(prefix),
+            None => (count > 0).then(|| Arc::new(seg)),
+        };
+        slot.seg = seg;
         g.done_count += 1;
         g.matches += count;
         g.snapshot = None;
         if g.matches >= self.max_matches && !g.truncated {
             g.truncated = true;
-            g.queue.clear();
+            Self::drop_scans(&mut g);
         }
     }
 
     fn run_extend(self: &Arc<Self>, new_end: u64) {
         let _serial = self.extend_lock.lock();
+        if self.cancelled.load(Ordering::Relaxed) {
+            let mut g = self.inner.lock();
+            g.pending_extends = g.pending_extends.saturating_sub(1);
+            return;
+        }
         let old_end = self.inner.lock().end;
         if new_end <= old_end {
-            self.inner.lock().pending_extends -= 1;
+            let mut g = self.inner.lock();
+            g.pending_extends = g.pending_extends.saturating_sub(1);
             return;
         }
         // Find where re-scanning must begin: the start of the last line if it
         // was unterminated (it may have grown), then back over the context
-        // lines that new matches could now claim.
+        // lines that new matches could now claim. Everything before that
+        // point keeps its results.
         let resume = self.tail_line_start(old_end);
         let dirty_from = match resume.and_then(|r| back_lines(self.source.as_ref(), r, self.before))
         {
             Ok(off) => off,
             Err(e) => {
                 tracing::warn!(error = %e, "extend could not probe the tail; rescanning last chunk");
-                old_end.saturating_sub(1)
+                let last = chunk_count(old_end, self.chunk_size).saturating_sub(1);
+                last as u64 * self.chunk_size
             }
         };
         let mut g = self.inner.lock();
-        g.pending_extends -= 1;
+        g.pending_extends = g.pending_extends.saturating_sub(1);
         g.end = new_end;
         g.epoch += 1;
         let epoch = g.epoch;
@@ -359,39 +455,86 @@ impl Shared {
             .unwrap_or(usize::MAX)
             .min(old_n);
         for i in first_dirty..old_n {
+            let cs = i as u64 * self.chunk_size;
             let slot = &mut g.slots[i];
+            let start = dirty_from.max(cs);
+            // A chunk whose rescan is still pending keeps the earlier start.
+            let from = if slot.done {
+                start
+            } else {
+                slot.scan_from.min(start)
+            };
+            let old_count = slot.seg.as_ref().map_or(0, |s| s.offsets.len() as u64);
+            let prefix = slot.seg.take().and_then(|seg| {
+                let keep = seg.offsets.partition_point(|&o| o < from);
+                if keep == seg.offsets.len() {
+                    Some(seg)
+                } else if keep == 0 {
+                    None
+                } else {
+                    Some(Arc::new(Segment {
+                        offsets: seg.offsets[..keep].to_vec(),
+                        context: if seg.context.is_empty() {
+                            Vec::new()
+                        } else {
+                            seg.context[..keep].to_vec()
+                        },
+                    }))
+                }
+            });
+            let kept = prefix.as_ref().map_or(0, |s| s.offsets.len() as u64);
             let was_done = slot.done;
-            let count = slot.seg.as_ref().map_or(0, |s| s.offsets.len() as u64);
             slot.epoch = epoch;
             slot.done = false;
-            slot.seg = None;
+            slot.seg = prefix;
+            slot.scan_from = from;
             if was_done {
                 g.done_count -= 1;
             }
-            g.matches -= count;
+            g.matches -= old_count - kept;
         }
-        for _ in old_n..new_n {
+        for i in old_n..new_n {
             g.slots.push(Slot {
                 epoch,
                 done: false,
                 seg: None,
+                scan_from: i as u64 * self.chunk_size,
             });
         }
-        // Follow updates are urgent: run them before the remaining backlog.
-        for chunk in (first_dirty..new_n).rev() {
-            g.queue.push_front(Task::Scan {
-                chunk,
-                epoch,
-                end: new_end,
-            });
+        // Re-check the limit: the invalidation may have freed room (or the
+        // job was already full and must not start new scans).
+        let was_truncated = g.truncated;
+        g.truncated = g.matches >= self.max_matches;
+        if was_truncated && !g.truncated {
+            // Scans dropped at truncation must run again.
+            for chunk in 0..first_dirty {
+                let slot = &g.slots[chunk];
+                if !slot.done {
+                    let task = Task::Scan {
+                        chunk,
+                        epoch: slot.epoch,
+                        end: new_end,
+                        from: slot.scan_from,
+                    };
+                    g.queue.push_back(task);
+                }
+            }
         }
-        if g.truncated && g.matches < self.max_matches {
-            g.truncated = false;
+        if !g.truncated {
+            // Follow updates are urgent: run them before the remaining backlog.
+            for chunk in (first_dirty..new_n).rev() {
+                let from = g.slots[chunk].scan_from;
+                g.queue.push_front(Task::Scan {
+                    chunk,
+                    epoch,
+                    end: new_end,
+                    from,
+                });
+            }
         }
         g.snapshot = None;
-        let spawn = self.workers_to_spawn(&mut g);
         drop(g);
-        self.spawn_workers(spawn);
+        self.kick();
     }
 
     /// Start of the last line before `old_end` if it lacks a terminator,
@@ -457,9 +600,14 @@ impl SearchHandle {
 
     /// The first entry with offset strictly greater than `offset`, answered
     /// as soon as the chunks between `offset` and that entry are scanned.
+    ///
+    /// Returns [`Lookup::Pending`] only while more results can still arrive.
+    /// Once the job is truncated (`max_matches`) or cancelled, chunks that
+    /// were never scanned answer [`Lookup::None`].
     pub fn next_after(&self, offset: u64) -> Lookup {
         let g = self.shared.inner.lock();
         let n = g.slots.len();
+        let dead = g.truncated || self.shared.cancelled.load(Ordering::Relaxed);
         if n == 0 || offset.saturating_add(1) >= g.end {
             return if g.pending_extends > 0 {
                 Lookup::Pending
@@ -472,7 +620,7 @@ impl SearchHandle {
             .min(n);
         for slot in &g.slots[start..] {
             if !slot.done {
-                return Lookup::Pending;
+                return if dead { Lookup::None } else { Lookup::Pending };
             }
             if let Some(seg) = &slot.seg {
                 let i = seg.offsets.partition_point(|&o| o <= offset);
@@ -481,7 +629,11 @@ impl SearchHandle {
                 }
             }
         }
-        Lookup::None
+        if g.pending_extends > 0 && !dead {
+            Lookup::Pending
+        } else {
+            Lookup::None
+        }
     }
 
     /// The last entry with offset strictly smaller than `offset`, answered
@@ -495,9 +647,10 @@ impl SearchHandle {
         let start = usize::try_from(offset / self.shared.chunk_size)
             .unwrap_or(n - 1)
             .min(n - 1);
+        let dead = g.truncated || self.shared.cancelled.load(Ordering::Relaxed);
         for slot in g.slots[..=start].iter().rev() {
             if !slot.done {
-                return Lookup::Pending;
+                return if dead { Lookup::None } else { Lookup::Pending };
             }
             if let Some(seg) = &slot.seg {
                 let i = seg.offsets.partition_point(|&o| o < offset);
@@ -517,16 +670,15 @@ impl SearchHandle {
         if self.shared.cancelled.load(Ordering::Relaxed) {
             return;
         }
-        let spawn = {
+        {
             let mut g = self.shared.inner.lock();
             if new_end <= g.end && g.pending_extends == 0 {
                 return;
             }
             g.pending_extends += 1;
             g.queue.push_front(Task::Extend(new_end));
-            self.shared.workers_to_spawn(&mut g)
-        };
-        self.shared.spawn_workers(spawn);
+        }
+        self.shared.kick();
     }
 
     /// Moves the viewport hint: remaining chunks are re-ordered so the ones
@@ -546,7 +698,15 @@ impl SearchHandle {
     /// Stops the job. Idempotent; also happens on drop.
     pub fn cancel(&self) {
         self.shared.cancelled.store(true, Ordering::Relaxed);
-        self.shared.inner.lock().queue.clear();
+        let mut g = self.shared.inner.lock();
+        // Dropped `Extend` tasks will never run: balance their counter.
+        let dropped = g
+            .queue
+            .iter()
+            .filter(|t| matches!(t, Task::Extend(_)))
+            .count();
+        g.pending_extends = g.pending_extends.saturating_sub(dropped);
+        g.queue.clear();
     }
 
     /// Whether the job was cancelled.
@@ -801,5 +961,238 @@ mod tests {
             assert!(Instant::now() < deadline);
             std::thread::yield_now();
         }
+    }
+
+    /// A source that counts the bytes handed out and can be slowed down.
+    struct Counting {
+        inner: MemSource,
+        bytes: std::sync::atomic::AtomicU64,
+        delay: Duration,
+    }
+
+    impl Counting {
+        fn new(data: Vec<u8>, delay: Duration) -> Self {
+            Self {
+                inner: MemSource::new(data),
+                bytes: Default::default(),
+                delay,
+            }
+        }
+    }
+
+    impl ReadAt for Counting {
+        fn read_at(&self, o: u64, b: &mut [u8]) -> std::io::Result<usize> {
+            if !self.delay.is_zero() {
+                std::thread::sleep(self.delay);
+            }
+            let n = self.inner.read_at(o, b)?;
+            self.bytes.fetch_add(n as u64, Ordering::Relaxed);
+            Ok(n)
+        }
+        fn len(&self) -> std::io::Result<u64> {
+            self.inner.len()
+        }
+    }
+
+    fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !f() {
+            assert!(Instant::now() < deadline, "timed out: {what}");
+            std::thread::yield_now();
+        }
+    }
+
+    fn x_lines(n: usize) -> Vec<u8> {
+        (0..n).flat_map(|_| b"x\n".to_vec()).collect()
+    }
+
+    #[test]
+    fn truncated_job_answers_none_not_pending() {
+        let data = x_lines(1000);
+        let len = data.len() as u64;
+        let h = SearchJob::start(
+            Arc::new(MemSource::new(data)),
+            len,
+            lit("x"),
+            SearchOptions {
+                chunk_size: 10,
+                max_matches: 5,
+                ..Default::default()
+            },
+        );
+        let s = wait(&h);
+        assert!(s.truncated);
+        assert_eq!(h.next_after(1500), Lookup::None);
+        assert_eq!(h.prev_before(1990), Lookup::None);
+    }
+
+    #[test]
+    fn cancelled_job_answers_none_not_pending() {
+        let data = x_lines(100_000);
+        let len = data.len() as u64;
+        let h = SearchJob::start(
+            Arc::new(MemSource::new(data)),
+            len,
+            lit("zz"),
+            SearchOptions {
+                chunk_size: 100,
+                viewport_hint: len / 2,
+                ..Default::default()
+            },
+        );
+        h.cancel();
+        assert!(h.poll().done);
+        // Some chunks were never scanned; none of these may stay Pending.
+        assert_eq!(h.next_after(0), Lookup::None);
+        assert_eq!(h.prev_before(len - 1), Lookup::None);
+    }
+
+    #[test]
+    fn cancel_balances_dropped_extend_tasks() {
+        let h = SearchJob::start(
+            Arc::new(MemSource::new(b"a\n".to_vec())),
+            2,
+            lit("a"),
+            SearchOptions::default(),
+        );
+        wait(&h);
+        {
+            let mut g = h.shared.inner.lock();
+            g.pending_extends += 1;
+            g.queue.push_back(Task::Extend(10));
+        }
+        h.cancel();
+        assert_eq!(h.shared.inner.lock().pending_extends, 0);
+    }
+
+    #[test]
+    fn truncation_keeps_extend_tasks() {
+        let mut g = Inner {
+            end: 0,
+            epoch: 0,
+            slots: Vec::new(),
+            queue: VecDeque::new(),
+            in_ring: false,
+            pending_extends: 1,
+            done_count: 0,
+            matches: 0,
+            io_errors: 0,
+            truncated: false,
+            snapshot: None,
+        };
+        g.queue.push_back(Task::Scan {
+            chunk: 0,
+            epoch: 0,
+            end: 1,
+            from: 0,
+        });
+        g.queue.push_back(Task::Extend(5));
+        Shared::drop_scans(&mut g);
+        assert_eq!(g.queue.len(), 1);
+        assert!(matches!(g.queue[0], Task::Extend(5)));
+    }
+
+    #[test]
+    fn extend_on_truncated_job_settles() {
+        let src = Arc::new(MemSource::new(x_lines(100)));
+        let h = SearchJob::start(
+            src.clone(),
+            200,
+            lit("x"),
+            SearchOptions {
+                chunk_size: 10,
+                max_matches: 5,
+                ..Default::default()
+            },
+        );
+        wait(&h);
+        src.append(&x_lines(100));
+        h.extend(400);
+        wait_until("extend to be processed", || {
+            let g = h.shared.inner.lock();
+            g.pending_extends == 0 && g.end == 400
+        });
+        let s = h.poll();
+        assert!(s.done && s.truncated);
+        assert!(s.matches_found <= 5 + 10, "no new scans once full");
+        assert_eq!(h.next_after(390), Lookup::None);
+    }
+
+    #[test]
+    fn next_after_is_pending_while_an_extend_is_outstanding() {
+        let h = SearchJob::start(
+            Arc::new(MemSource::new(b"a\nb\n".to_vec())),
+            4,
+            lit("a"),
+            SearchOptions::default(),
+        );
+        wait(&h);
+        assert_eq!(h.next_after(0), Lookup::None);
+        h.shared.inner.lock().pending_extends = 1;
+        assert_eq!(h.next_after(0), Lookup::Pending);
+        assert_eq!(h.next_after(100), Lookup::Pending);
+        h.shared.inner.lock().pending_extends = 0;
+        assert_eq!(h.next_after(0), Lookup::None);
+    }
+
+    #[test]
+    fn small_jobs_are_not_starved_by_a_long_one() {
+        let big = Arc::new(Counting::new(x_lines(20_000), Duration::from_millis(3)));
+        let big_len = big.len().unwrap();
+        let long = SearchJob::start(
+            big,
+            big_len,
+            lit("zz"),
+            SearchOptions {
+                chunk_size: 8,
+                ..Default::default()
+            },
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        let small = SearchJob::start(
+            Arc::new(MemSource::new(b"one\ntwo\n".to_vec())),
+            8,
+            lit("two"),
+            SearchOptions::default(),
+        );
+        wait(&small);
+        assert_eq!(small.matches().iter().collect::<Vec<_>>(), vec![4]);
+        assert!(!long.poll().done, "the long job should still be running");
+    }
+
+    #[test]
+    fn extend_rescans_only_the_tail() {
+        let mut data = Vec::new();
+        for i in 0..40_000 {
+            data.extend_from_slice(format!("line {i} hit\n").as_bytes());
+        }
+        let len = data.len() as u64;
+        assert!(len > 500_000);
+        let src = Arc::new(Counting::new(data, Duration::ZERO));
+        let h = SearchJob::start(
+            src.clone(),
+            len,
+            lit("hit"),
+            SearchOptions {
+                chunk_size: 4 * 1024 * 1024,
+                ..Default::default()
+            },
+        );
+        wait(&h);
+        let before = h.matches().len();
+        for round in 0..3 {
+            src.bytes.store(0, Ordering::Relaxed);
+            src.inner.append(b"more hit\npartial hi");
+            let end = src.len().unwrap();
+            h.extend(end);
+            wait(&h);
+            let read = src.bytes.load(Ordering::Relaxed);
+            assert!(read < 16 * 1024, "round {round}: read {read} bytes");
+            src.inner.append(b"t tail\n");
+            let end = src.len().unwrap();
+            h.extend(end);
+            wait(&h);
+        }
+        assert_eq!(h.matches().len(), before + 3 + 3);
     }
 }

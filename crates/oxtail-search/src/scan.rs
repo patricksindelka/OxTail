@@ -48,6 +48,39 @@ pub(crate) fn align_up(src: &dyn ReadAt, x: u64, end: u64) -> io::Result<u64> {
     Ok(end)
 }
 
+/// The first line start in `[x, limit)`, or `None` when the range holds none.
+/// A line starting at `p > 0` has its preceding `\n` at `p - 1`, so only bytes
+/// in `[x - 1, limit - 1)` are read: bounded by the chunk, never by the line.
+pub(crate) fn first_start_in(
+    src: &dyn ReadAt,
+    x: u64,
+    limit: u64,
+    end: u64,
+) -> io::Result<Option<u64>> {
+    let limit = limit.min(end);
+    if x >= limit {
+        return Ok(None);
+    }
+    if x == 0 {
+        return Ok(Some(0));
+    }
+    let hi = limit - 1;
+    let mut buf = [0u8; BLOCK];
+    let mut pos = x - 1;
+    while pos < hi {
+        let want = usize::try_from(hi - pos).unwrap_or(usize::MAX).min(BLOCK);
+        let n = src.read_at(pos, &mut buf[..want])?;
+        if n == 0 {
+            return Ok(None);
+        }
+        if let Some(i) = memchr(b'\n', &buf[..n]) {
+            return Ok(Some(pos + i as u64 + 1));
+        }
+        pos += n as u64;
+    }
+    Ok(None)
+}
+
 /// Reads `[a, b)`, clamped to [`MAX_REGION`] and to what the source has.
 pub(crate) fn read_range(src: &dyn ReadAt, a: u64, b: u64) -> io::Result<Vec<u8>> {
     let len = usize::try_from((b.saturating_sub(a)).min(MAX_REGION)).unwrap_or(usize::MAX);
@@ -131,7 +164,12 @@ pub(crate) fn scan_chunk(
     before: u32,
     after: u32,
 ) -> io::Result<Segment> {
-    let s = align_up(src, a, end)?;
+    // Only bytes inside the chunk are searched for the first owned line; the
+    // end of the last owned line is searched for once, by the chunk that owns
+    // its start. Chunks inside one huge line therefore cost O(chunk).
+    let Some(s) = first_start_in(src, a, b, end)? else {
+        return Ok(Segment::default());
+    };
     let e = align_up(src, b.min(end), end)?;
     if s >= e {
         return Ok(Segment::default());
@@ -220,6 +258,38 @@ mod tests {
         assert_eq!(align_up(&src, 7, end).unwrap(), 7);
         assert_eq!(align_up(&src, 8, end).unwrap(), 9);
         assert_eq!(align_up(&src, 50, end).unwrap(), 9);
+    }
+
+    #[test]
+    fn huge_line_chunks_read_linear_bytes() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        struct Counting(MemSource, AtomicU64);
+        impl ReadAt for Counting {
+            fn read_at(&self, o: u64, b: &mut [u8]) -> io::Result<usize> {
+                let n = self.0.read_at(o, b)?;
+                self.1.fetch_add(n as u64, Ordering::Relaxed);
+                Ok(n)
+            }
+            fn len(&self) -> io::Result<u64> {
+                self.0.len()
+            }
+        }
+        let mut data = vec![b'a'; 4 << 20];
+        data.extend_from_slice(b"\nhit\n");
+        let len = data.len() as u64;
+        let src = Counting(MemSource::new(data), AtomicU64::new(0));
+        let pred = crate::Matcher::compile(&crate::Query::literal("hit")).unwrap();
+        let chunk = 16 * 1024u64;
+        let mut found = Vec::new();
+        let mut a = 0;
+        while a < len {
+            let seg = scan_chunk(&src, a, (a + chunk).min(len), len, &pred, 0, 0).unwrap();
+            found.extend(seg.offsets);
+            a += chunk;
+        }
+        assert_eq!(found, vec![(4 << 20) + 1]);
+        let read = src.1.load(Ordering::Relaxed);
+        assert!(read < 3 * len, "read {read} bytes for a {len} byte file");
     }
 
     #[test]
