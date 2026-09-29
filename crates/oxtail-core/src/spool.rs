@@ -15,6 +15,17 @@ use crate::encoding::{LineEnding, TextEncoding, Transcoder};
 use crate::error::CoreError;
 use crate::source::{FileSource, ReadAt};
 
+/// File-name prefix of every temp file this crate creates in the spool
+/// directory (transcoding spools and stdin buffers). A startup cleanup of
+/// crashed sessions only deletes files with this prefix.
+///
+/// **Must match `oxtail_config::datadir::SPOOL_PREFIX`** (this crate must not
+/// depend on `oxtail-config`, so the value is duplicated).
+pub const SPOOL_PREFIX: &str = "oxtail-spool-";
+
+/// Prefix of the stdin buffer files (starts with [`SPOOL_PREFIX`]).
+pub(crate) const STDIN_SPOOL_PREFIX: &str = "oxtail-spool-stdin-";
+
 /// Creates a named temp file in `dir`, falling back to the system temp dir.
 pub(crate) fn create_temp(dir: Option<&Path>, prefix: &str) -> Result<NamedTempFile, CoreError> {
     let mut b = tempfile::Builder::new();
@@ -36,6 +47,12 @@ pub(crate) struct Spool {
     transcoder: Transcoder,
     len: u64,
     scratch: Vec<u8>,
+    /// Set by a failed write: the transcoder has advanced past bytes that are
+    /// not (fully) in the file, so the spool can only be discarded.
+    poisoned: bool,
+    /// Test hook: number of upcoming appends that write half and then fail.
+    #[cfg(test)]
+    pub(crate) fault: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl Spool {
@@ -45,7 +62,7 @@ impl Spool {
         encoding: TextEncoding,
         line_ending: LineEnding,
     ) -> Result<Self, CoreError> {
-        let tmp = create_temp(dir, "oxtail-")?;
+        let tmp = create_temp(dir, SPOOL_PREFIX)?;
         let reader_file: File = tmp
             .reopen()
             .map_err(|e| CoreError::io(tmp.path().to_path_buf(), e))?;
@@ -55,6 +72,9 @@ impl Spool {
             transcoder: Transcoder::new(encoding, line_ending),
             len: 0,
             scratch: Vec::new(),
+            poisoned: false,
+            #[cfg(test)]
+            fault: None,
         })
     }
 
@@ -68,16 +88,56 @@ impl Spool {
         self.len
     }
 
+    /// `true` after a failed write. A poisoned spool refuses further appends
+    /// and must be replaced (transcoder state cannot be rewound).
+    pub(crate) fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
     /// Transcodes `raw` (the next bytes of the raw file) and appends the result.
+    ///
+    /// On a write error the spool is poisoned and the file is cut back to
+    /// [`Spool::len`] (best effort) so readers never see bytes the length does
+    /// not cover.
     pub(crate) fn append(&mut self, raw: &[u8]) -> io::Result<()> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "spool is poisoned by an earlier write error",
+            ));
+        }
         self.scratch.clear();
         self.transcoder.transcode(raw, &mut self.scratch);
-        if !self.scratch.is_empty() {
-            let mut f = self.tmp.as_file();
-            f.write_all(&self.scratch)?;
-            self.len += self.scratch.len() as u64;
+        if self.scratch.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        match self.write_scratch() {
+            Ok(()) => {
+                self.len += self.scratch.len() as u64;
+                Ok(())
+            }
+            Err(e) => {
+                self.poisoned = true;
+                let _ = self.tmp.as_file().set_len(self.len);
+                Err(e)
+            }
+        }
+    }
+
+    fn write_scratch(&self) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(fault) = &self.fault {
+            use std::sync::atomic::Ordering;
+            let armed = fault
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+            if armed {
+                let mut f = self.tmp.as_file();
+                f.write_all(&self.scratch[..self.scratch.len() / 2])?;
+                return Err(io::Error::other("injected write failure"));
+            }
+        }
+        let mut f = self.tmp.as_file();
+        f.write_all(&self.scratch)
     }
 
     /// Location of the spool file (for tests).
@@ -106,6 +166,18 @@ mod tests {
         assert_eq!(&buf[..n], b"hi\n");
         drop(s);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn spool_files_carry_the_shared_prefix() {
+        assert!(STDIN_SPOOL_PREFIX.starts_with(SPOOL_PREFIX));
+        let dir = tempfile::tempdir().unwrap();
+        let s = Spool::new(Some(dir.path()), TextEncoding::UTF_16LE, LineEnding::Lf).unwrap();
+        let name = s.path().file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with(SPOOL_PREFIX), "{name}");
+        let t = create_temp(Some(dir.path()), STDIN_SPOOL_PREFIX).unwrap();
+        let name = t.path().file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with(SPOOL_PREFIX), "{name}");
     }
 
     #[test]

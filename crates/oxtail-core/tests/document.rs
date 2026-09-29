@@ -3,7 +3,7 @@
 mod common;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use common::*;
 use oxtail_core::{
@@ -371,6 +371,18 @@ fn stdin_like_reader_is_spooled_and_followed() {
     wait_until("writer finished", || !doc.snapshot().writing);
     let t = request(&doc, LineRequest::Tail { count: 1 });
     assert_eq!(texts(&t), ["line 99"]);
+    // Every file left in the spool dir carries the shared prefix.
+    let names: Vec<String> = std::fs::read_dir(spool.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(!names.is_empty());
+    assert!(
+        names
+            .iter()
+            .all(|n| n.starts_with(oxtail_core::SPOOL_PREFIX)),
+        "{names:?}"
+    );
     drop(doc);
     assert_eq!(spool_files(spool.path()), 0);
 }
@@ -564,4 +576,153 @@ fn approximate_numbers_before_indexing_completes() {
     assert!(t[0].number_exact);
     assert_eq!(t[0].number, 174_761);
     assert_eq!(doc.snapshot().state, DocState::Ready);
+}
+
+#[test]
+fn request_from_an_old_generation_gets_an_empty_answer_tagged_old() {
+    let src = Arc::new(MemSource::new(b"aaaa\nbbbb\ncccc\n".to_vec()));
+    let doc = Document::from_source_with(src.clone(), "mem", small_opts());
+    wait_ready(&doc, 15);
+    let g0 = doc.generation();
+    src.replace(b"zz\nyyyyyyyy\n".to_vec());
+    doc.refresh();
+    wait_ready(&doc, 12);
+    assert!(doc.generation() > g0);
+    // Offsets 5 and 10 belonged to the old content; they must not be resolved
+    // against the new content and tagged as current.
+    let id = doc.request_lines_in(g0, LineRequest::AtOffsets(vec![5, 10]));
+    let (g, lines) = wait_lines(&doc, id);
+    assert_eq!(g, g0);
+    assert!(lines.is_empty(), "{lines:?}");
+    // A request made now is answered in the current generation.
+    let id = doc.request_lines(LineRequest::Range { first: 0, count: 5 });
+    let (g, lines) = wait_lines(&doc, id);
+    assert_eq!(g, doc.generation());
+    assert_eq!(texts(&lines), ["zz", "yyyyyyyy"]);
+}
+
+#[test]
+fn blocking_helpers_report_the_generation() {
+    let src = Arc::new(MemSource::new(numbered(50)));
+    let doc = Document::from_source_with(src.clone(), "mem", small_opts());
+    let len = numbered(50).len() as u64;
+    wait_ready(&doc, len);
+    let (g, lines) = doc.read_lines_blocking_with_generation(10, 2);
+    assert_eq!(g, doc.generation());
+    assert_eq!(texts(&lines), ["line 10", "line 11"]);
+    assert_eq!(doc.read_lines_blocking(10, 2), lines);
+    let (g2, pos) = doc.line_of_offset_with_generation(len - 3).unwrap();
+    assert_eq!(g2, g);
+    assert_eq!(pos.line, 49);
+    src.replace(b"only\n".to_vec());
+    doc.refresh();
+    wait_ready(&doc, 5);
+    let (g3, lines) = doc.read_lines_blocking_with_generation(0, 5);
+    assert!(g3 > g);
+    assert_eq!(texts(&lines), ["only"]);
+}
+
+/// A source that counts the bytes handed out.
+struct Counting {
+    inner: MemSource,
+    bytes: AtomicU64,
+}
+
+impl ReadAt for Counting {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read_at(offset, buf)?;
+        self.bytes.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+    fn len(&self) -> std::io::Result<u64> {
+        self.inner.len()
+    }
+}
+
+#[test]
+fn requests_on_a_huge_single_line_read_bounded_bytes() {
+    let n = 64 * 1024 * 1024;
+    let src = Arc::new(Counting {
+        inner: MemSource::new(vec![b'x'; n]),
+        bytes: AtomicU64::new(0),
+    });
+    let doc = Document::from_source_with(
+        src.clone(),
+        "long",
+        OpenOptions {
+            follow: false,
+            ..OpenOptions::default()
+        },
+    );
+    wait_ready(&doc, n as u64);
+    let read = || src.bytes.swap(0, Ordering::Relaxed);
+    read();
+    let mib = 1024 * 1024;
+
+    let t = request(&doc, LineRequest::Tail { count: 10 });
+    assert_eq!(t.len(), 1);
+    assert!(!t[0].number_exact, "start of a cut-off tail is approximate");
+    let tail_bytes = read();
+    assert!(tail_bytes < 24 * mib, "tail read {} MiB", tail_bytes / mib);
+
+    let f = request(
+        &doc,
+        LineRequest::ByteFraction {
+            fraction: 0.5,
+            count: 1,
+        },
+    );
+    assert_eq!(f.len(), 1);
+    // Forward measurement of the one long line is inherent; the backward
+    // search and the number lookup are what must stay bounded.
+    assert!(f[0].offset >= n as u64 / 2 - 4 * mib - 64 * 1024);
+    let pos = doc.line_of_offset(n as u64 / 2).unwrap();
+    assert_eq!(pos.line, 0);
+    assert!(pos.exact);
+    assert!(!pos.start_exact);
+    let lookup_bytes = read();
+    // 2 x 4 MiB back-scans + 2 x <=64 KiB counts + the forward line
+    // measurement of the fraction request (32 MiB).
+    assert!(
+        lookup_bytes < 48 * mib,
+        "lookups read {} MiB",
+        lookup_bytes / mib
+    );
+
+    let a = request(&doc, LineRequest::AtOffsets(vec![n as u64 / 4]));
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].number, 0);
+    assert!(a[0].number_exact);
+}
+
+#[test]
+fn one_response_never_carries_more_than_the_text_budget() {
+    // 1500 lines of ~16 KiB = ~24 MiB; asking for all of them must not yield
+    // 24 MiB of text in a single event.
+    let mut data = Vec::new();
+    for i in 0..1500 {
+        data.extend_from_slice(format!("{i:05} ").as_bytes());
+        data.extend_from_slice(&vec![b'z'; 16 * 1024 - 6]);
+        data.push(b'\n');
+    }
+    let src = Arc::new(MemSource::new(data.clone()));
+    let doc = Document::from_source_with(src, "wide", small_opts());
+    wait_ready(&doc, data.len() as u64);
+    for req in [
+        LineRequest::Range {
+            first: 0,
+            count: 20_000,
+        },
+        LineRequest::Tail { count: 20_000 },
+        LineRequest::AtOffsets((0..1500u64).map(|i| i * 16385).collect()),
+    ] {
+        let lines = request(&doc, req);
+        let total: usize = lines.iter().map(|l| l.text.len()).sum();
+        assert!(!lines.is_empty());
+        assert!(lines.len() < 1500, "{} lines", lines.len());
+        assert!(
+            total <= 8 * 1024 * 1024 + 16 * 1024,
+            "{total} bytes of text"
+        );
+    }
 }

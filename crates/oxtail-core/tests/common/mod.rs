@@ -57,3 +57,17 @@ pub fn request(doc: &Document, req: LineRequest) -> Vec<Line> {
 pub fn texts(lines: &[Line]) -> Vec<&str> {
     lines.iter().map(|l| l.text.as_str()).collect()
 }
+
+/// Waits for the `Lines` answer to request `id`; returns `(generation, lines)`.
+pub fn wait_lines(doc: &Document, id: oxtail_core::RequestId) -> (u64, Vec<Line>) {
+    match wait_event(
+        doc,
+        "lines answer",
+        |e| matches!(e, DocEvent::Lines { id: i, .. } if *i == id),
+    ) {
+        DocEvent::Lines {
+            generation, lines, ..
+        } => (generation, lines),
+        _ => unreachable!(),
+    }
+}

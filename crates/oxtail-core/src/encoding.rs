@@ -156,7 +156,7 @@ fn utf16_by_nuls(sample: &[u8]) -> Option<TextEncoding> {
 fn detect_line_ending(sample: &[u8], enc: TextEncoding) -> LineEnding {
     let (has_cr, has_lf) = if enc.is_utf8() {
         (
-            memchr::memchr(b'\r', sample).is_some(),
+            has_cr_before_end(sample),
             memchr::memchr(b'\n', sample).is_some(),
         )
     } else {
@@ -164,7 +164,7 @@ fn detect_line_ending(sample: &[u8], enc: TextEncoding) -> LineEnding {
         let mut out = Vec::new();
         t.transcode(sample, &mut out);
         (
-            memchr::memchr(b'\r', &out).is_some(),
+            has_cr_before_end(&out),
             memchr::memchr(b'\n', &out).is_some(),
         )
     };
@@ -173,6 +173,17 @@ fn detect_line_ending(sample: &[u8], enc: TextEncoding) -> LineEnding {
     } else {
         LineEnding::Lf
     }
+}
+
+/// `true` if `out` (UTF-8) contains a `\r`, not counting one on the very last
+/// byte: that may be the first half of a `\r\n` cut off by the end of the
+/// sample.
+fn has_cr_before_end(out: &[u8]) -> bool {
+    let body = match out.split_last() {
+        Some((b'\r', rest)) => rest,
+        _ => out,
+    };
+    memchr::memchr(b'\r', body).is_some()
 }
 
 /// Incremental raw -> UTF-8 converter with `\r` -> `\n` mapping for
@@ -326,6 +337,24 @@ mod tests {
         assert_eq!(
             convert(TextEncoding::UTF_8, LineEnding::Cr, b"a\r\nb\rc"),
             "a\nb\nc"
+        );
+    }
+
+    #[test]
+    fn trailing_cr_of_the_sample_is_ambiguous() {
+        // Could be the first half of a CRLF: not lone-CR.
+        assert_eq!(
+            detect(b"a\r", EncodingChoice::Auto).line_ending,
+            LineEnding::Lf
+        );
+        assert_eq!(
+            detect(&utf16("a\r", false, true), EncodingChoice::Auto).line_ending,
+            LineEnding::Lf
+        );
+        // An earlier CR settles it.
+        assert_eq!(
+            detect(b"a\rb\r", EncodingChoice::Auto).line_ending,
+            LineEnding::Cr
         );
     }
 
