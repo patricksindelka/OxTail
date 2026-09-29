@@ -48,7 +48,7 @@ impl Default for Allowlist {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Os {
     Linux,
-    MacOs,
+    Mac,
     Windows,
 }
 
@@ -102,7 +102,7 @@ impl Allowlist {
     pub fn family(&self, os: Os) -> &Family {
         match os {
             Os::Linux => &self.linux,
-            Os::MacOs => &self.macos,
+            Os::Mac => &self.macos,
             Os::Windows => &self.windows,
         }
     }
@@ -172,15 +172,21 @@ pub fn dependencies(data: &[u8]) -> Result<(Os, Vec<String>)> {
             elf_needed::<elf::FileHeader64<Endianness>>(data)?,
         ),
         FileKind::MachO32 => (
-            Os::MacOs,
+            Os::Mac,
             macho_dylibs::<macho::MachHeader32<Endianness>>(data)?,
         ),
         FileKind::MachO64 => (
-            Os::MacOs,
+            Os::Mac,
             macho_dylibs::<macho::MachHeader64<Endianness>>(data)?,
         ),
-        FileKind::Pe32 => (Os::Windows, pe_imports::<object::pe::ImageNtHeaders32>(data)?),
-        FileKind::Pe64 => (Os::Windows, pe_imports::<object::pe::ImageNtHeaders64>(data)?),
+        FileKind::Pe32 => (
+            Os::Windows,
+            pe_imports::<object::pe::ImageNtHeaders32>(data)?,
+        ),
+        FileKind::Pe64 => (
+            Os::Windows,
+            pe_imports::<object::pe::ImageNtHeaders64>(data)?,
+        ),
         k => bail!("unsupported binary format {k:?} (fat Mach-O archives are not supported)"),
     })
 }
