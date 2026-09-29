@@ -1,0 +1,52 @@
+# Python's logging module with its most common format string:
+#   "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# The comma before the milliseconds is what `asctime` prints by default.
+name = "Python logging"
+match_files = ["*.py.log", "python*.log", "django*.log", "flask*.log", "celery*.log", "gunicorn*.log"]
+match_content = '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} - [\w.\-]+ - (DEBUG|INFO|WARNING|ERROR|CRITICAL) - '
+
+[columns]
+parser = "regex"
+pattern = '^(?P<time>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}) - (?P<logger>[\w.\-]+) - (?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL) - (?P<message>.*)$'
+order = ["time", "level", "logger", "message"]
+
+[timestamp]
+column = "time"
+format = "iso8601_comma"
+
+[[rules]]
+name = "CRITICAL"
+match = { column = "level", op = "eq", value = "critical" }
+scope = "line"
+style = { fg = "fatal", bg = "fatal.subtle", bold = true }
+priority = 50
+
+[[rules]]
+name = "ERROR"
+match = { column = "level", op = "eq", value = "error" }
+scope = "line"
+style = { bg = "error.subtle" }
+priority = 40
+
+[[rules]]
+name = "WARNING"
+match = { column = "level", op = "eq", value = "warning" }
+scope = "column:level"
+style = { fg = "warn", bold = true }
+priority = 30
+
+[[rules]]
+name = "DEBUG"
+match = { column = "level", op = "eq", value = "debug" }
+scope = "line"
+style = { fg = "muted" }
+priority = 10
+
+# Tracebacks are continuation lines: they do not match the parser, so they
+# attach to the record above and span all columns.
+[[rules]]
+name = "Traceback"
+match = { regex = '^Traceback \(most recent call last\):|^\s+File "[^"]+", line \d+|^\w+(\.\w+)*(Error|Exception): ' }
+scope = "line"
+style = { fg = "error" }
+priority = 20

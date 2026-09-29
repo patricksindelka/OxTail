@@ -1,0 +1,9 @@
+2026-09-29 10:01:02,123 - app.main - INFO - starting worker pool with 4 workers
+2026-09-29 10:01:02,410 - app.db - DEBUG - opened connection 3 to postgres://db:5432/app
+2026-09-29 10:01:03,077 - app.http - WARNING - upstream answered in 1.8 s
+2026-09-29 10:01:04,512 - app.http - ERROR - request failed
+Traceback (most recent call last):
+  File "/srv/app/http.py", line 88, in fetch
+    resp = session.get(url, timeout=2)
+requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='api', port=443): Read timed out.
+2026-09-29 10:01:05,001 - app.main - CRITICAL - giving up after 3 retries

@@ -1,0 +1,6 @@
+Level,Date and Time,Source,Event ID,Task Category
+Information,9/29/2026 10:01:02 AM,Service Control Manager,7036,None
+Warning,9/29/2026 10:03:17 AM,Microsoft-Windows-DNS-Client,1014,(1014)
+Error,9/29/2026 10:05:44 AM,Application Error,1000,(100)
+Information,9/29/2026 10:06:01 AM,Microsoft-Windows-Kernel-General,12,None
+Error,9/29/2026 10:07:30 AM,disk,7,None

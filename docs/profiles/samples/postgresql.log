@@ -1,0 +1,8 @@
+2026-09-29 10:01:02.123 UTC [4242] LOG:  checkpoint starting: time
+2026-09-29 10:01:02.981 UTC [4242] LOG:  checkpoint complete: wrote 312 buffers (1.9%); 0 WAL file(s) added
+2026-09-29 10:01:15.400 UTC [5310] LOG:  duration: 2310.552 ms  statement: SELECT * FROM orders WHERE customer_id = 42
+2026-09-29 10:01:20.017 UTC [5311] ERROR:  duplicate key value violates unique constraint "orders_pkey"
+2026-09-29 10:01:20.017 UTC [5311] DETAIL:  Key (id)=(1042) already exists.
+2026-09-29 10:01:20.017 UTC [5311] STATEMENT:  INSERT INTO orders (id) VALUES (1042)
+2026-09-29 10:01:31.760 UTC [5312] WARNING:  there is already a transaction in progress
+2026-09-29 10:01:40.002 UTC [5313] FATAL:  terminating connection due to administrator command

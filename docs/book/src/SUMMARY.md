@@ -1,0 +1,33 @@
+# Summary
+
+[Introduction](introduction.md)
+
+- [Installation and portable mode](install.md)
+- [Opening and following files](opening.md)
+- [Search](search.md)
+- [Filters](filters.md)
+- [Highlighting and profiles](profiles.md)
+<!-- gen-docs:gallery:start -->
+- [Profile gallery](gallery/index.md)
+  - [Apache access](gallery/apache-access.md)
+  - [Generic](gallery/generic.md)
+  - [IIS W3C](gallery/iis-w3c.md)
+  - [JSON lines](gallery/jsonl.md)
+  - [Java / log4j](gallery/log4j.md)
+  - [logfmt](gallery/logfmt.md)
+  - [Nginx access](gallery/nginx-access.md)
+  - [Syslog](gallery/syslog.md)
+  - [Kubernetes container (CRI)](gallery/kubernetes-cri.md)
+  - [Node.js pino (JSON)](gallery/node-pino.md)
+  - [PostgreSQL](gallery/postgresql.md)
+  - [Python logging](gallery/python-logging.md)
+  - [Spring Boot](gallery/spring-boot.md)
+  - [Windows Event Log (CSV)](gallery/windows-event-csv.md)
+<!-- gen-docs:gallery:end -->
+- [Columns](columns.md)
+- [Time and multiple files](time.md)
+- [Keyboard shortcuts](shortcuts.md)
+- [Command line](cli.md)
+- [Settings reference](settings.md)
+- [Themes](themes.md)
+- [Troubleshooting](troubleshooting.md)

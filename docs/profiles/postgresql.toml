@@ -1,0 +1,61 @@
+# PostgreSQL server log with the prefix "%m [%p] " (the default of
+# log_line_prefix in the Debian/Ubuntu packages):
+#   2026-09-29 10:01:02.123 UTC [4242] LOG:  checkpoint starting: time
+# The severity is followed by a colon and two spaces.
+name = "PostgreSQL"
+match_files = ["postgresql*.log", "postgres*.log", "pg_log/*.log"]
+match_content = '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+ \S+ \[\d+\] (DEBUG\d?|INFO|NOTICE|WARNING|ERROR|LOG|FATAL|PANIC|STATEMENT|DETAIL|HINT|CONTEXT):'
+
+[columns]
+parser = "regex"
+pattern = '^(?P<time>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+) (?P<zone>\S+) \[(?P<pid>\d+)\] (?P<severity>DEBUG\d?|INFO|NOTICE|WARNING|ERROR|LOG|FATAL|PANIC|STATEMENT|DETAIL|HINT|CONTEXT):\s+(?P<message>.*)$'
+order = ["time", "pid", "severity", "message", "zone"]
+kinds = { severity = "text" }
+
+[timestamp]
+column = "time"
+format = "iso8601"
+
+[[rules]]
+name = "FATAL / PANIC"
+match = { column = "severity", op = "regex", value = "^(FATAL|PANIC)$" }
+scope = "line"
+style = { fg = "fatal", bg = "fatal.subtle", bold = true }
+priority = 50
+
+[[rules]]
+name = "ERROR"
+match = { column = "severity", op = "eq", value = "ERROR" }
+scope = "line"
+style = { bg = "error.subtle" }
+priority = 40
+
+[[rules]]
+name = "WARNING"
+match = { column = "severity", op = "eq", value = "WARNING" }
+scope = "column:severity"
+style = { fg = "warn", bold = true }
+priority = 30
+
+# log_min_duration_statement lines: "duration: 1234.567 ms  statement: ..."
+[[rules]]
+name = "slow statements (1 s and more)"
+match = { regex = 'duration: (\d{4,}\.\d+ ms)' }
+scope = "group:1"
+style = { fg = "warn", bold = true }
+priority = 25
+
+[[rules]]
+name = "deadlock and lock waits"
+match = { regex = '(?i)\b(deadlock detected|still waiting for|canceling statement due to)\b' }
+scope = "match"
+style = { fg = "error", underline = true }
+priority = 35
+alert = true
+
+[[rules]]
+name = "DETAIL / HINT / STATEMENT"
+match = { column = "severity", op = "regex", value = "^(DETAIL|HINT|STATEMENT|CONTEXT)$" }
+scope = "line"
+style = { fg = "muted" }
+priority = 5

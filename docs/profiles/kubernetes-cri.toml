@@ -1,0 +1,46 @@
+# Kubernetes container logs in the CRI format written by containerd and
+# CRI-O: "<RFC 3339 time> <stdout|stderr> <P|F> <message>".
+# P marks a partial line (the runtime split a long line), F a full one.
+name = "Kubernetes container (CRI)"
+match_files = ["/var/log/pods/**/*.log", "/var/log/containers/*.log"]
+match_content = '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z (stdout|stderr) [PF] '
+
+[columns]
+parser = "regex"
+pattern = '^(?P<time>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) (?P<stream>stdout|stderr) (?P<tag>[PF]) (?P<message>.*)$'
+order = ["time", "stream", "message", "tag"]
+
+[timestamp]
+column = "time"
+format = "rfc3339"
+
+# Everything a container writes to stderr gets a tinted background.
+[[rules]]
+name = "stderr"
+match = { column = "stream", op = "eq", value = "stderr" }
+scope = "line"
+style = { bg = "warn.subtle" }
+priority = 5
+
+# The application's own level, whatever the logging library prints.
+[[rules]]
+name = "error words"
+match = { regex = '\b(FATAL|CRITICAL|PANIC|ERROR|level=error)\b' }
+scope = "match"
+style = { fg = "error", bold = true }
+priority = 40
+
+[[rules]]
+name = "warning words"
+match = { regex = '\b(WARN|WARNING|level=warn)\b' }
+scope = "match"
+style = { fg = "warn", bold = true }
+priority = 30
+
+[[rules]]
+name = "Kubernetes events"
+match = { regex = '\b(CrashLoopBackOff|OOMKilled|ImagePullBackOff|Evicted|Back-off restarting)\b' }
+scope = "match"
+style = { fg = "fatal", bold = true, underline = true }
+priority = 50
+bookmark = true

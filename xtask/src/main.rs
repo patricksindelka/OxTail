@@ -1,6 +1,7 @@
 //! Developer tooling for OxTail: `cargo xtask <command>`.
 
 mod checkdeps;
+mod docs;
 mod genlog;
 mod logfmt;
 
@@ -17,6 +18,7 @@ COMMANDS:
     gen-log       Generate a deterministic synthetic log file
     append-log    Simulate a live log writer (with rotation) for follow testing
     check-deps    Verify a binary's dynamic dependencies and size against an allowlist
+    gen-docs      Generate and validate the profile gallery of the user guide
 
 Run `cargo xtask <COMMAND> --help` for details.
 ";
@@ -35,6 +37,7 @@ fn run() -> Result<()> {
             "gen-log" => genlog::run_gen(parser),
             "append-log" => genlog::run_append(parser),
             "check-deps" => checkdeps::run(parser),
+            "gen-docs" => docs::run(parser),
             other => bail!("unknown command `{other}`\n\n{HELP}"),
         },
         Some(lexopt::Arg::Short('h') | lexopt::Arg::Long("help")) | None => {

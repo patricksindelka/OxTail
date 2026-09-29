@@ -1,0 +1,6 @@
+{"level":30,"time":1790676062123,"pid":4821,"hostname":"web-1","msg":"server listening at http://0.0.0.0:3000"}
+{"level":20,"time":1790676062410,"pid":4821,"hostname":"web-1","msg":"pool ready","size":10}
+{"level":30,"time":1790676063077,"pid":4821,"hostname":"web-1","req":{"method":"GET","url":"/api/users"},"res":{"statusCode":200},"responseTime":12,"msg":"request completed"}
+{"level":40,"time":1790676064512,"pid":4821,"hostname":"web-1","msg":"slow upstream","upstream":"payments","ms":1800}
+{"level":50,"time":1790676065001,"pid":4821,"hostname":"web-1","res":{"statusCode":502},"responseTime":30012,"msg":"request errored"}
+{"level":60,"time":1790676066000,"pid":4821,"hostname":"web-1","msg":"uncaught exception, exiting"}

@@ -1,0 +1,6 @@
+2026-09-29T10:01:02.123456789Z stdout F server listening on :8080
+2026-09-29T10:01:03.004211980Z stdout F level=info msg="request served" path=/api/users status=200
+2026-09-29T10:01:04.981200000Z stderr F WARN cache miss ratio above threshold: 0.42
+2026-09-29T10:01:05.310045221Z stderr P panic: runtime error: invalid memory address or nil pointer dereference
+2026-09-29T10:01:05.310112009Z stderr F goroutine 1 [running]:
+2026-09-29T10:01:07.000001000Z stdout F Back-off restarting failed container app in pod web-7d9f

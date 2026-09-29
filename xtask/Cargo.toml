@@ -9,8 +9,14 @@ anyhow = { workspace = true }
 fastrand = { workspace = true }
 lexopt = { workspace = true }
 object = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
+# gen-docs validates profiles with the real loaders and parsers.
+oxtail-columns = { workspace = true }
+oxtail-config = { workspace = true }
+oxtail-highlight = { workspace = true }
+oxtail-time = { workspace = true }
 
 [lints]
 workspace = true

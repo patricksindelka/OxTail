@@ -5178,6 +5178,11 @@ dependencies = [
  "fastrand",
  "lexopt",
  "object",
+ "oxtail-columns",
+ "oxtail-config",
+ "oxtail-highlight",
+ "oxtail-time",
+ "regex",
  "serde",
  "toml",
 ]

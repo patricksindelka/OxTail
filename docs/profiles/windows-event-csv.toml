@@ -1,0 +1,45 @@
+# Windows Event Viewer export ("Save All Events As..." to CSV). The first
+# line is the header row, so the column names come from the file itself:
+#   Level,Date and Time,Source,Event ID,Task Category
+# The timestamp format "us" reads month-first dates such as
+# "9/29/2026 10:01:02 AM"; other locales export other shapes.
+name = "Windows Event Log (CSV)"
+match_files = ["*event*.csv", "Application.csv", "System.csv", "Security.csv"]
+match_content = '^"?Level"?,"?Date and Time"?,"?Source"?,"?Event ID"?'
+
+[columns]
+parser = "csv"
+delimiter = ","
+
+[timestamp]
+column = "Date and Time"
+format = "us"
+
+[[rules]]
+name = "Critical / Error"
+match = { column = "Level", op = "regex", value = "^(Critical|Error)$" }
+scope = "line"
+style = { bg = "error.subtle" }
+priority = 40
+
+[[rules]]
+name = "Warning"
+match = { column = "Level", op = "eq", value = "Warning" }
+scope = "column:Level"
+style = { fg = "warn", bold = true }
+priority = 30
+
+[[rules]]
+name = "Audit failure"
+match = { literal = "Audit Failure" }
+scope = "match"
+style = { fg = "error", bold = true }
+priority = 35
+alert = true
+
+[[rules]]
+name = "Information"
+match = { column = "Level", op = "eq", value = "Information" }
+scope = "line"
+style = { fg = "muted" }
+priority = 5

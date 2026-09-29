@@ -1,0 +1,53 @@
+# Spring Boot's default console/file layout (Logback), for example:
+#   2026-09-29T10:01:02.123+02:00  INFO 4821 --- [           main] c.e.demo.DemoApplication : Started
+# The level is right-aligned to five characters, so INFO has two spaces
+# in front of it.
+name = "Spring Boot"
+match_files = ["spring*.log", "application*.log", "*-app.log"]
+match_content = '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+([+-]\d\d:\d\d|Z)\s+(TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\s+\d+ --- '
+
+[columns]
+parser = "regex"
+pattern = '^(?P<time>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+(?:[+-]\d\d:\d\d|Z))\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\s+(?P<pid>\d+) --- (?:\[(?P<app>[^\]]*)\] )?\[\s*(?P<thread>[^\]]*?)\s*\] (?P<logger>\S+)\s*: (?P<message>.*)$'
+order = ["time", "level", "thread", "logger", "message", "pid", "app"]
+kinds = { pid = "number" }
+
+[timestamp]
+column = "time"
+format = "rfc3339"
+
+[[rules]]
+name = "ERROR / FATAL"
+match = { column = "level", op = "regex", value = "^(ERROR|FATAL)$" }
+scope = "line"
+style = { bg = "error.subtle" }
+priority = 40
+
+[[rules]]
+name = "WARN"
+match = { column = "level", op = "eq", value = "warn" }
+scope = "column:level"
+style = { fg = "warn", bold = true }
+priority = 30
+
+[[rules]]
+name = "Java stack trace"
+match = { regex = '^\s+at [\w$.]+\(.*\)$|^Caused by: |^\s+\.\.\. \d+ (common frames omitted|more)$' }
+scope = "line"
+style = { fg = "muted" }
+priority = 10
+
+[[rules]]
+name = "Application startup"
+match = { regex = 'Started \w+ in [\d.]+ seconds' }
+scope = "match"
+style = { fg = "success", bold = true }
+priority = 20
+bookmark = true
+
+[[rules]]
+name = "Slow query hint"
+match = { regex = '\b(took|elapsed)[ =:]+(\d{4,}) ?ms' }
+scope = "group:2"
+style = { fg = "warn", bold = true }
+priority = 15

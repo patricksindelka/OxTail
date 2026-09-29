@@ -1,0 +1,17 @@
+[book]
+title = "OxTail User Guide"
+authors = ["The OxTail contributors"]
+description = "A portable, real-time log viewer: opening and following files, search, filters, highlighting, columns and time."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/patricksindelka/OxTail"
+edit-url-template = "https://github.com/patricksindelka/OxTail/edit/main/docs/book/{path}"
+site-url = "/OxTail/"
+default-theme = "light"
+preferred-dark-theme = "navy"

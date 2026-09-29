@@ -1,0 +1,9 @@
+2026-09-29T10:01:02.123+02:00  INFO 4821 --- [           main] com.example.demo.DemoApplication         : Starting DemoApplication using Java 21.0.4
+2026-09-29T10:01:03.870+02:00  INFO 4821 --- [           main] com.example.demo.DemoApplication         : Started DemoApplication in 1.912 seconds (process running for 2.401)
+2026-09-29T10:01:09.552+02:00  WARN 4821 --- [nio-8080-exec-2] o.h.engine.jdbc.spi.SqlExceptionHelper   : SQL Warning Code: 0, SQLState: 00000
+2026-09-29T10:01:11.004+02:00 ERROR 4821 --- [nio-8080-exec-4] c.e.demo.web.OrderController             : Order 1042 failed
+java.lang.IllegalStateException: stock is negative
+	at com.example.demo.service.StockService.reserve(StockService.java:57)
+	at com.example.demo.web.OrderController.create(OrderController.java:31)
+	... 42 common frames omitted
+2026-09-29T10:01:12.200+02:00  INFO 4821 --- [nio-8080-exec-5] c.e.demo.web.OrderController             : query took 2310 ms

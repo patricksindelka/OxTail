@@ -6,3 +6,4 @@
 /oxtail-data
 *.log.tmp
 /.claude/worktrees
+/docs/book/book
