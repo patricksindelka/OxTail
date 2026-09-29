@@ -1,0 +1,69 @@
+# Allowed dynamic dependencies of the release binary (PLAN.md section 3).
+# Matching is case-insensitive; `*` and `?` are glob wildcards.
+# The OS family is taken from the binary format (ELF / Mach-O / PE).
+# `deny` entries win over `allow` entries.
+
+max_size_mb = 20
+
+[linux]
+# glibc core only. X11 / Wayland / GL / Vulkan are dlopen'ed by winit/wgpu/glutin
+# and must NOT show up as DT_NEEDED.
+allow = [
+    "libc.so.6",
+    "libm.so.6",
+    "libgcc_s.so.1",
+    "libpthread.so.0",
+    "libdl.so.2",
+    "librt.so.1",
+    "ld-linux-*.so.*",
+]
+deny = []
+
+[macos]
+allow = [
+    "/usr/lib/libSystem.B.dylib",
+    "/usr/lib/libobjc.A.dylib",
+    "/usr/lib/libiconv*",
+    "/usr/lib/libc++*",
+    "/System/Library/Frameworks/*",
+]
+deny = []
+
+[windows]
+allow = [
+    "kernel32.dll",
+    "user32.dll",
+    "gdi32.dll",
+    "ntdll.dll",
+    "advapi32.dll",
+    "shell32.dll",
+    "ole32.dll",
+    "oleaut32.dll",
+    "comctl32.dll",
+    "comdlg32.dll",
+    "uxtheme.dll",
+    "dwmapi.dll",
+    "imm32.dll",
+    "ws2_32.dll",
+    "bcrypt*.dll",
+    "crypt32.dll",
+    "secur32.dll",
+    "userenv.dll",
+    "winmm.dll",
+    "version.dll",
+    "setupapi.dll",
+    "shlwapi.dll",
+    "propsys.dll",
+    "opengl32.dll",
+    "d3d12.dll",
+    "dxgi.dll",
+    "d3dcompiler_47.dll",
+    "api-ms-win-core-*.dll",
+]
+# A dynamic CRT means the binary was not built with `-C target-feature=+crt-static`.
+deny = [
+    "vcruntime*.dll",
+    "msvcp*.dll",
+    "ucrtbase.dll",
+    "api-ms-win-crt-*",
+]
