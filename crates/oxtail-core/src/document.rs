@@ -963,6 +963,10 @@ impl Actor {
                 return;
             }
             loop {
+                // A dropped `Document` must not wait for the queued backlog.
+                if self.shared.shutdown.load(Ordering::Acquire) {
+                    return;
+                }
                 match self.rx.try_recv() {
                     Ok(cmd) => {
                         if !self.handle(cmd) {
