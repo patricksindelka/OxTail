@@ -20,8 +20,16 @@
 //! 2. has already advanced past the candidate (its latest effective timestamp
 //!    is greater, or equal with a higher source index, so it cannot still
 //!    produce an earlier entry), or
-//! 3. has been idle (nothing pushed) for at least
-//!    [`MergeConfig::idle_delay`].
+//! 3. is *live* (see [`MergeBuilder::mark_live`]) and has been idle (nothing
+//!    pushed) for at least [`MergeConfig::idle_delay`].
+//!
+//! Sources start **not live**: during the initial load a source that has not
+//! delivered its next line yet is merely slow, not idle, so the merge keeps
+//! waiting for it (otherwise periodic drains would degenerate into
+//! concatenating the sources). The initial load must therefore end with
+//! [`MergeBuilder::close_source`] for every source that is finished, or
+//! [`MergeBuilder::mark_live`] once a source has caught up with its file and
+//! is only being followed.
 //!
 //! Rule 3 trades strict correctness for liveness: if an idle source later
 //! delivers a line older than entries already emitted, that line is emitted
@@ -99,6 +107,7 @@ struct Source {
     queue: VecDeque<(u64, Timestamp)>,
     last: Option<Timestamp>,
     closed: bool,
+    live: bool,
     last_activity: Instant,
 }
 
@@ -120,6 +129,7 @@ impl MergeBuilder {
                     queue: VecDeque::new(),
                     last: None,
                     closed: false,
+                    live: false,
                     last_activity: now,
                 })
                 .collect(),
@@ -166,13 +176,24 @@ impl MergeBuilder {
         }
     }
 
+    /// Declares that `source` has caught up with its file and is now only
+    /// followed: from now on it may be treated as idle (rule 3) after
+    /// [`MergeConfig::idle_delay`] without new lines, counted from `now`.
+    pub fn mark_live(&mut self, source: usize, now: Instant) {
+        if let Some(s) = self.sources.get_mut(source) {
+            s.live = true;
+            s.last_activity = now;
+        }
+    }
+
     fn can_emit(&self, key: Timestamp, source: usize, now: Instant) -> bool {
         self.sources.iter().enumerate().all(|(t, s)| {
             !s.queue.is_empty()
                 || s.closed
                 || s.last
                     .is_some_and(|le| le > key || (le == key && t > source))
-                || now.saturating_duration_since(s.last_activity) >= self.config.idle_delay
+                || (s.live
+                    && now.saturating_duration_since(s.last_activity) >= self.config.idle_delay)
         })
     }
 
@@ -271,6 +292,7 @@ mod tests {
             idle_delay: Duration::from_secs(1),
         };
         let mut m = MergeBuilder::new(2, cfg, t0);
+        m.mark_live(1, t0);
         m.push(0, 0, ts(10), t0);
         m.push(0, 1, ts(20), t0);
         // Source 1 has said nothing: nothing is final yet.
@@ -304,12 +326,43 @@ mod tests {
     }
 
     #[test]
+    fn initial_load_with_periodic_drains_is_not_concatenation() {
+        let t0 = Instant::now();
+        let cfg = MergeConfig {
+            idle_delay: Duration::from_millis(10),
+        };
+        let mut m = MergeBuilder::new(2, cfg, t0);
+        let mut out = vec![];
+        // Source 0 is loaded first (slowly: drains happen long after
+        // idle_delay), then source 1, whose lines interleave.
+        for i in 0..5u64 {
+            let t = t0 + Duration::from_secs(10 * (i + 1));
+            m.push(0, i, ts(i as i64 * 2), t);
+            out.extend(m.drain(t));
+        }
+        assert!(out.is_empty(), "source 1 is still loading: {out:?}");
+        for i in 0..5u64 {
+            let t = t0 + Duration::from_secs(100 + i);
+            m.push(1, i, ts(i as i64 * 2 + 1), t);
+            out.extend(m.drain(t));
+        }
+        m.close_source(0);
+        m.close_source(1);
+        out.extend(m.drain(t0 + Duration::from_secs(200)));
+        out.extend(m.finish());
+        let got: Vec<(usize, u64)> = out.iter().map(|e| (e.source(), e.line())).collect();
+        let want: Vec<(usize, u64)> = (0..10).map(|k| (k % 2, (k / 2) as u64)).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
     fn late_line_after_idle_is_emitted_after() {
         let t0 = Instant::now();
         let cfg = MergeConfig {
             idle_delay: Duration::from_millis(10),
         };
         let mut m = MergeBuilder::new(2, cfg, t0);
+        m.mark_live(1, t0);
         m.push(0, 0, ts(10), t0);
         let t1 = t0 + Duration::from_secs(1);
         assert_eq!(m.drain(t1).len(), 1);
