@@ -83,12 +83,14 @@ impl Partial {
     fn finish(mut self, terminated: bool, number: u64, exact: bool, max: usize) -> Line {
         if terminated {
             self.len += 1;
-            if self.content_len > 0 && self.last == b'\r' {
-                if self.content.len() as u64 == self.content_len {
-                    self.content.pop();
-                }
-                self.content_len -= 1;
+        }
+        // A trailing `\r` is hidden even on an unterminated last line: it is
+        // usually the first half of a `\r\n` that is still being written.
+        if self.content_len > 0 && self.last == b'\r' {
+            if self.content.len() as u64 == self.content_len {
+                self.content.pop();
             }
+            self.content_len -= 1;
         }
         let shown = self.content.len().min(max.saturating_add(3));
         let mut text = String::from_utf8_lossy(&self.content[..shown]).into_owned();
@@ -269,9 +271,9 @@ mod tests {
                 let mut content = &data[l.offset as usize..end as usize];
                 if terminated {
                     content = &content[..content.len() - 1];
-                    if content.last() == Some(&b'\r') {
-                        content = &content[..content.len() - 1];
-                    }
+                }
+                if content.last() == Some(&b'\r') {
+                    content = &content[..content.len() - 1];
                 }
                 prop_assert!(l.truncated || content.len() <= max);
                 prop_assert!(!l.truncated || String::from_utf8_lossy(content).len() > max || content.len() > max);
