@@ -219,69 +219,72 @@ impl LineIndex {
     ///
     /// Reads at most one checkpoint interval from `src`.
     pub fn offset_of_line(&self, src: &dyn ReadAt, line: u64) -> io::Result<Option<u64>> {
+        self.plan_offset_of_line(line).resolve(src)
+    }
+
+    /// The lock-free half of [`LineIndex::offset_of_line`]: copies out what is
+    /// needed so the caller can drop its lock before doing any I/O.
+    pub(crate) fn plan_offset_of_line(&self, line: u64) -> LineSeek {
         if line >= self.total_lines() {
-            return Ok(None);
+            return LineSeek::Missing;
         }
         if line == 0 {
-            return Ok(Some(0));
+            return LineSeek::Known(0);
         }
         if line == self.newlines {
-            return Ok(Some(self.tail_start));
+            return LineSeek::Known(self.tail_start);
         }
         // Last checkpoint whose newline count is strictly below `line`.
         let i = self.cps.partition_point(|c| c.line < line) - 1;
         let cp = self.cps[i];
-        let mut need = line - cp.line; // find the `need`-th newline at/after cp.offset
-        let mut pos = cp.offset;
-        let mut buf = vec![0u8; (self.spacing as usize).clamp(4096, 64 * 1024)];
-        while pos < self.indexed {
-            let want = ((self.indexed - pos) as usize).min(buf.len());
-            let n = read_full(src, pos, &mut buf[..want])?;
-            if n == 0 {
-                return Ok(None);
-            }
-            for p in memchr::memchr_iter(b'\n', &buf[..n]) {
-                need -= 1;
-                if need == 0 {
-                    return Ok(Some(pos + p as u64 + 1));
-                }
-            }
-            pos += n as u64;
+        LineSeek::Scan {
+            pos: cp.offset,
+            need: line - cp.line,
+            end: self.indexed,
         }
-        Ok(None)
     }
 
     /// Line containing byte `offset` (clamped to the indexed region) and where
     /// it starts. Exact. If `offset` is a line start the result is that line.
     ///
     /// Scans at most one checkpoint interval forward, plus a backward scan to
-    /// find the line start when the line began before the checkpoint.
+    /// find the line start when the line began before the checkpoint (which
+    /// is unbounded; see [`LineIndex::line_of_offset_bounded`]).
     pub fn line_of_offset(&self, src: &dyn ReadAt, offset: u64) -> io::Result<LinePos> {
+        Ok(self.line_of_offset_bounded(src, offset, u64::MAX)?.0)
+    }
+
+    /// Like [`LineIndex::line_of_offset`], but the backward scan for the line
+    /// start reads at most `max_back` bytes. The returned flag is `false`
+    /// when that limit was hit: `line` is still exact, but `start` is then
+    /// only the point where the scan gave up (inside the line).
+    pub fn line_of_offset_bounded(
+        &self,
+        src: &dyn ReadAt,
+        offset: u64,
+        max_back: u64,
+    ) -> io::Result<(LinePos, bool)> {
+        self.plan_number_of_offset(offset).resolve(src, max_back)
+    }
+
+    /// Exact number of the line containing `offset` (clamped to the indexed
+    /// region), *without* looking for where that line starts. Reads at most
+    /// one checkpoint interval, however long the line is.
+    pub fn line_number_of_offset(&self, src: &dyn ReadAt, offset: u64) -> io::Result<u64> {
+        let plan = self.plan_number_of_offset(offset);
+        Ok(plan.base_line + count_newlines(src, plan.from, plan.to)?.0)
+    }
+
+    /// Lock-free half of the line-of-offset lookups.
+    pub(crate) fn plan_number_of_offset(&self, offset: u64) -> NumberPlan {
         let off = offset.min(self.indexed);
         let i = self.cps.partition_point(|c| c.offset <= off) - 1;
         let cp = self.cps[i];
-        let mut line = cp.line;
-        let mut last_nl: Option<u64> = None;
-        let mut pos = cp.offset;
-        let mut buf = vec![0u8; (self.spacing as usize).clamp(4096, 64 * 1024)];
-        while pos < off {
-            let want = ((off - pos) as usize).min(buf.len());
-            let n = read_full(src, pos, &mut buf[..want])?;
-            if n == 0 {
-                break;
-            }
-            let seg = &buf[..n];
-            line += memchr::memchr_iter(b'\n', seg).count() as u64;
-            if let Some(p) = memchr::memrchr(b'\n', seg) {
-                last_nl = Some(pos + p as u64);
-            }
-            pos += n as u64;
+        NumberPlan {
+            base_line: cp.line,
+            from: cp.offset,
+            to: off,
         }
-        let start = match last_nl {
-            Some(p) => p + 1,
-            None => line_start_before(src, cp.offset, u64::MAX)?,
-        };
-        Ok(LinePos { line, start })
     }
 
     /// Average line length seen so far (for estimates); a guess of 100 when
@@ -341,10 +344,116 @@ fn chunk_len(spacing: u64) -> usize {
     target as usize
 }
 
+/// Where to find a line start, computed under the index lock and resolved
+/// without it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LineSeek {
+    /// The offset is known without reading.
+    Known(u64),
+    /// No such line in the indexed region.
+    Missing,
+    /// Find the `need`-th newline at or after `pos` (before `end`); the line
+    /// starts right after it.
+    Scan { pos: u64, need: u64, end: u64 },
+}
+
+impl LineSeek {
+    /// Performs the read (at most one checkpoint interval).
+    pub(crate) fn resolve(self, src: &dyn ReadAt) -> io::Result<Option<u64>> {
+        match self {
+            LineSeek::Known(o) => Ok(Some(o)),
+            LineSeek::Missing => Ok(None),
+            LineSeek::Scan { pos, need, end } => {
+                let mut need = need;
+                let mut pos = pos;
+                let mut buf = vec![0u8; ((end.saturating_sub(pos)) as usize).clamp(1, 64 * 1024)];
+                while pos < end {
+                    let want = ((end - pos) as usize).min(buf.len());
+                    let n = read_full(src, pos, &mut buf[..want])?;
+                    if n == 0 {
+                        return Ok(None);
+                    }
+                    for p in memchr::memchr_iter(b'\n', &buf[..n]) {
+                        need -= 1;
+                        if need == 0 {
+                            return Ok(Some(pos + p as u64 + 1));
+                        }
+                    }
+                    pos += n as u64;
+                }
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// Newlines in `[from, to)` on top of `base_line` give the line number of
+/// `to`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NumberPlan {
+    pub(crate) base_line: u64,
+    pub(crate) from: u64,
+    pub(crate) to: u64,
+}
+
+impl NumberPlan {
+    /// Line number plus line start (see [`LineIndex::line_of_offset_bounded`]).
+    pub(crate) fn resolve(self, src: &dyn ReadAt, max_back: u64) -> io::Result<(LinePos, bool)> {
+        let (count, last_nl) = count_newlines(src, self.from, self.to)?;
+        let (start, exact) = match last_nl {
+            Some(p) => (p + 1, true),
+            None => line_start_before_bounded(src, self.from, max_back)?,
+        };
+        Ok((
+            LinePos {
+                line: self.base_line + count,
+                start,
+            },
+            exact,
+        ))
+    }
+}
+
+/// Counts `\n` in `[from, to)` and reports the position of the last one.
+pub(crate) fn count_newlines(
+    src: &dyn ReadAt,
+    from: u64,
+    to: u64,
+) -> io::Result<(u64, Option<u64>)> {
+    let mut count = 0;
+    let mut last = None;
+    let mut pos = from;
+    let mut buf = vec![0u8; ((to.saturating_sub(from)) as usize).clamp(1, 64 * 1024)];
+    while pos < to {
+        let want = ((to - pos) as usize).min(buf.len());
+        let n = read_full(src, pos, &mut buf[..want])?;
+        if n == 0 {
+            break;
+        }
+        let seg = &buf[..n];
+        count += memchr::memchr_iter(b'\n', seg).count() as u64;
+        if let Some(p) = memchr::memrchr(b'\n', seg) {
+            last = Some(pos + p as u64);
+        }
+        pos += n as u64;
+    }
+    Ok((count, last))
+}
+
 /// Start of the line containing byte `offset` (the position after the last
 /// `\n` strictly before `offset`, or 0), scanning backward at most `max_back`
 /// bytes. When the limit is hit the scan position is returned (mid-line).
 pub fn line_start_before(src: &dyn ReadAt, offset: u64, max_back: u64) -> io::Result<u64> {
+    Ok(line_start_before_bounded(src, offset, max_back)?.0)
+}
+
+/// Like [`line_start_before`], also reporting whether the result is a real
+/// line start (`false`: the scan limit was hit or the source shrank).
+pub fn line_start_before_bounded(
+    src: &dyn ReadAt,
+    offset: u64,
+    max_back: u64,
+) -> io::Result<(u64, bool)> {
     let mut end = offset;
     let floor = offset.saturating_sub(max_back);
     let mut buf = vec![0u8; 64 * 1024];
@@ -353,14 +462,14 @@ pub fn line_start_before(src: &dyn ReadAt, offset: u64, max_back: u64) -> io::Re
         let n = read_full(src, start, &mut buf[..(end - start) as usize])?;
         if n < (end - start) as usize {
             // Source shrank; give up gracefully.
-            return Ok(floor.max(start));
+            return Ok((floor.max(start), false));
         }
         if let Some(p) = memchr::memrchr(b'\n', &buf[..n]) {
-            return Ok(start + p as u64 + 1);
+            return Ok((start + p as u64 + 1, true));
         }
         end = start;
     }
-    Ok(floor)
+    Ok((floor, floor == 0))
 }
 
 /// Finds the start of the line that begins `count - 1` lines before the last
@@ -517,6 +626,42 @@ mod tests {
             prop_assert!(complete);
             let expect = if starts.is_empty() { 0 } else { starts[starts.len().saturating_sub(count)] };
             prop_assert_eq!(got, if data.is_empty() { data.len() as u64 } else { expect });
+        }
+    }
+
+    #[test]
+    fn bounded_lookups_do_not_scan_whole_long_lines() {
+        // One 1 MB line, then a short one.
+        let mut data = vec![b'x'; 1_000_000];
+        data.extend_from_slice(b"\nshort\n");
+        let src = MemSource::new(data.clone());
+        let mut idx = LineIndex::with_spacing(4096);
+        idx.extend(&src, data.len() as u64, &|| false).unwrap();
+        let (pos, exact) = idx.line_of_offset_bounded(&src, 500_000, 10_000).unwrap();
+        assert_eq!(pos.line, 0);
+        assert!(!exact);
+        assert!(pos.start >= 500_000 - 4096 - 10_000);
+        let (pos, exact) = idx.line_of_offset_bounded(&src, 500_000, u64::MAX).unwrap();
+        assert_eq!((pos, exact), (LinePos { line: 0, start: 0 }, true));
+        assert_eq!(idx.line_number_of_offset(&src, 500_000).unwrap(), 0);
+        assert_eq!(idx.line_number_of_offset(&src, 1_000_001).unwrap(), 1);
+        let (s, ok) = line_start_before_bounded(&src, 900_000, 1000).unwrap();
+        assert!(!ok);
+        assert_eq!(s, 899_000);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn line_number_only_matches_naive(data in data_strategy(), spacing in 1u64..70) {
+            let src = MemSource::new(data.clone());
+            let mut idx = LineIndex::with_spacing(spacing);
+            idx.extend(&src, data.len() as u64, &|| false).unwrap();
+            for off in 0..=data.len() as u64 {
+                let line = data[..off as usize].iter().filter(|b| **b == b'\n').count() as u64;
+                prop_assert_eq!(idx.line_number_of_offset(&src, off).unwrap(), line);
+            }
         }
     }
 

@@ -51,7 +51,8 @@ use crate::encoding::{Detected, EncodingChoice, LineEnding, SAMPLE_LEN, TextEnco
 use crate::error::CoreError;
 use crate::follow::{AdaptiveInterval, Change, FollowMode, FsWatcher, classify};
 use crate::index::{
-    DEFAULT_SPACING, LineIndex, SCAN_CHUNK, Scanner, find_tail_start, line_start_before,
+    DEFAULT_SPACING, LineIndex, LineSeek, SCAN_CHUNK, Scanner, count_newlines, find_tail_start,
+    line_start_before_bounded,
 };
 use crate::line::{DEFAULT_MAX_DISPLAY_LEN, Line, read_lines};
 use crate::source::{FileSource, PathState, ReadAt, SwitchSource};
@@ -64,7 +65,7 @@ const SPOOL_STEP: usize = 4 * 1024 * 1024;
 /// Backlog above which the state reads `Indexing` instead of `Ready`.
 const INDEXING_BACKLOG: u64 = 4 * 1024 * 1024;
 /// Longest backward scan for a tail request (guards against endless lines).
-const MAX_BACKSCAN: u64 = 32 * 1024 * 1024;
+const MAX_BACKSCAN: u64 = 8 * 1024 * 1024;
 /// Longest backward scan to find the line start for a byte position.
 const MAX_ALIGN_BACK: u64 = 4 * 1024 * 1024;
 /// Upper bound on lines returned by one request.
@@ -246,8 +247,13 @@ pub struct LinePosition {
     pub line: u64,
     /// `false` if the offset lies beyond the indexed region (estimate).
     pub exact: bool,
-    /// Start offset of that line (best effort when not exact).
+    /// Start offset of that line (best effort when not exact, or when
+    /// `start_exact` is `false`).
     pub start: u64,
+    /// `false` if the line is so long that the backward search for its start
+    /// hit the scan limit (a few MiB); `start` is then a point inside the line
+    /// while `line` may still be exact.
+    pub start_exact: bool,
 }
 
 /// Notifications and results from the actor, see [`Document::events`].
@@ -344,13 +350,20 @@ impl Shared {
     }
 
     /// Line number of the line starting at `off`: exact inside the indexed
-    /// region, estimated beyond it.
-    fn number_at(&self, idx: &LineIndex, off: u64) -> io::Result<(u64, bool)> {
-        if off <= idx.indexed_bytes() {
-            Ok((idx.line_of_offset(&self.cached, off)?.line, true))
-        } else {
-            Ok((idx.estimate_line_of_offset(off), false))
-        }
+    /// region, estimated beyond it. Counts newlines forward from a checkpoint
+    /// (at most one interval, however long the line is), through the raw
+    /// view so the UI block cache is not polluted, and holds no lock while
+    /// reading.
+    fn number_at(&self, off: u64) -> io::Result<(u64, bool)> {
+        let plan = {
+            let idx = self.index.read();
+            if off > idx.indexed_bytes() {
+                return Ok((idx.estimate_line_of_offset(off), false));
+            }
+            idx.plan_number_of_offset(off)
+        };
+        let (count, _) = count_newlines(&*self.view, plan.from, plan.to)?;
+        Ok((plan.base_line + count, true))
     }
 
     fn read_request(&self, req: &LineRequest) -> io::Result<Vec<Line>> {
@@ -359,21 +372,34 @@ impl Shared {
         match req {
             LineRequest::Range { first, count } => {
                 let count = (*count).min(MAX_REQUEST_LINES);
-                let (start, number, exact) = {
+                enum Seek {
+                    Plan(LineSeek),
+                    Estimate(u64),
+                }
+                // Copy what is needed out of the index, then release the lock
+                // before any I/O.
+                let seek = {
                     let idx = self.index.read();
                     if *first < idx.total_lines() {
-                        match idx.offset_of_line(&self.cached, *first)? {
-                            Some(o) => (o, *first, true),
-                            None => return Ok(Vec::new()),
-                        }
+                        Seek::Plan(idx.plan_offset_of_line(*first))
                     } else if idx.indexed_bytes() >= limit || limit == 0 {
                         return Ok(Vec::new());
                     } else {
-                        let e = idx
-                            .estimate_offset_of_line(*first)
-                            .min(limit.saturating_sub(1));
-                        let s = self.line_start_containing(e)?;
-                        (s, idx.estimate_line_of_offset(s), false)
+                        Seek::Estimate(
+                            idx.estimate_offset_of_line(*first)
+                                .min(limit.saturating_sub(1)),
+                        )
+                    }
+                };
+                let (start, number, exact) = match seek {
+                    Seek::Plan(plan) => match plan.resolve(&*self.view)? {
+                        Some(o) => (o, *first, true),
+                        None => return Ok(Vec::new()),
+                    },
+                    Seek::Estimate(e) => {
+                        let (s, _) = self.line_start_containing(e)?;
+                        let number = self.index.read().estimate_line_of_offset(s);
+                        (s, number, false)
                     }
                 };
                 read_lines(&self.cached, start, count, limit, number, exact, max)
@@ -383,12 +409,17 @@ impl Shared {
                 if limit == 0 {
                     return Ok(Vec::new());
                 }
-                let (start, _) = find_tail_start(&self.cached, limit, count, MAX_BACKSCAN)?;
-                let (number, exact) = {
-                    let idx = self.index.read();
-                    self.number_at(&idx, start)?
-                };
-                read_lines(&self.cached, start, count, limit, number, exact, max)
+                let (start, complete) = find_tail_start(&*self.view, limit, count, MAX_BACKSCAN)?;
+                let (number, exact) = self.number_at(start)?;
+                read_lines(
+                    &self.cached,
+                    start,
+                    count,
+                    limit,
+                    number,
+                    exact && complete,
+                    max,
+                )
             }
             LineRequest::AtOffsets(offsets) => {
                 let mut out = Vec::with_capacity(offsets.len().min(MAX_REQUEST_LINES));
@@ -396,10 +427,7 @@ impl Shared {
                     if off >= limit {
                         continue;
                     }
-                    let (number, exact) = {
-                        let idx = self.index.read();
-                        self.number_at(&idx, off)?
-                    };
+                    let (number, exact) = self.number_at(off)?;
                     out.extend(read_lines(&self.cached, off, 1, limit, number, exact, max)?);
                 }
                 Ok(out)
@@ -415,26 +443,33 @@ impl Shared {
                     0.0
                 };
                 let off = ((f * limit as f64) as u64).min(limit - 1);
-                let start = self.line_start_containing(off)?;
-                let (number, exact) = {
-                    let idx = self.index.read();
-                    self.number_at(&idx, start)?
-                };
-                read_lines(&self.cached, start, count, limit, number, exact, max)
+                let (start, complete) = self.line_start_containing(off)?;
+                let (number, exact) = self.number_at(start)?;
+                read_lines(
+                    &self.cached,
+                    start,
+                    count,
+                    limit,
+                    number,
+                    exact && complete,
+                    max,
+                )
             }
         }
     }
 
-    /// Start of the line containing byte `off` (bounded backward scan).
-    fn line_start_containing(&self, off: u64) -> io::Result<u64> {
+    /// Start of the line containing byte `off` (bounded backward scan through
+    /// the raw view). The flag is `false` when the bound was hit and the
+    /// result is mid-line.
+    fn line_start_containing(&self, off: u64) -> io::Result<(u64, bool)> {
         if off == 0 {
-            return Ok(0);
+            return Ok((0, true));
         }
         let mut b = [0u8; 1];
-        if self.cached.read_at(off - 1, &mut b)? == 1 && b[0] == b'\n' {
-            return Ok(off);
+        if self.view.read_at(off - 1, &mut b)? == 1 && b[0] == b'\n' {
+            return Ok((off, true));
         }
-        line_start_before(&self.cached, off, MAX_ALIGN_BACK)
+        line_start_before_bounded(&*self.view, off, MAX_ALIGN_BACK)
     }
 }
 
@@ -709,23 +744,33 @@ impl Document {
     /// region, estimated beyond it. Reads shared state and may read one
     /// block: **for worker threads, not the UI thread**.
     pub fn line_of_offset(&self, offset: u64) -> io::Result<LinePosition> {
-        let idx = self.shared.index.read();
-        if offset <= idx.indexed_bytes() {
-            let p = idx.line_of_offset(&self.shared.cached, offset)?;
-            Ok(LinePosition {
-                line: p.line,
-                exact: true,
-                start: p.start,
-            })
-        } else {
-            let line = idx.estimate_line_of_offset(offset);
-            drop(idx);
-            let start = self.shared.line_start_containing(offset)?;
-            Ok(LinePosition {
-                line,
-                exact: false,
-                start,
-            })
+        let plan = {
+            let idx = self.shared.index.read();
+            if offset <= idx.indexed_bytes() {
+                Ok(idx.plan_number_of_offset(offset))
+            } else {
+                Err(idx.estimate_line_of_offset(offset))
+            }
+        };
+        match plan {
+            Ok(plan) => {
+                let (p, start_exact) = plan.resolve(&*self.shared.view, MAX_ALIGN_BACK)?;
+                Ok(LinePosition {
+                    line: p.line,
+                    exact: true,
+                    start: p.start,
+                    start_exact,
+                })
+            }
+            Err(line) => {
+                let (start, start_exact) = self.shared.line_start_containing(offset)?;
+                Ok(LinePosition {
+                    line,
+                    exact: false,
+                    start,
+                    start_exact,
+                })
+            }
         }
     }
 
@@ -748,10 +793,8 @@ impl Document {
     /// Start offset of line `line`, or `None` if it is not (yet) in the
     /// indexed region. Same threading caveat as [`Document::line_of_offset`].
     pub fn offset_of_line(&self, line: u64) -> io::Result<Option<u64>> {
-        self.shared
-            .index
-            .read()
-            .offset_of_line(&self.shared.cached, line)
+        let plan = self.shared.index.read().plan_offset_of_line(line);
+        plan.resolve(&*self.shared.view)
     }
 
     /// Synchronously reads `count` lines from line `first` (like

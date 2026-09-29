@@ -3,7 +3,7 @@
 mod common;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use common::*;
 use oxtail_core::{
@@ -608,4 +608,77 @@ fn blocking_helpers_report_the_generation() {
     let (g3, lines) = doc.read_lines_blocking_with_generation(0, 5);
     assert!(g3 > g);
     assert_eq!(texts(&lines), ["only"]);
+}
+
+/// A source that counts the bytes handed out.
+struct Counting {
+    inner: MemSource,
+    bytes: AtomicU64,
+}
+
+impl ReadAt for Counting {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read_at(offset, buf)?;
+        self.bytes.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+    fn len(&self) -> std::io::Result<u64> {
+        self.inner.len()
+    }
+}
+
+#[test]
+fn requests_on_a_huge_single_line_read_bounded_bytes() {
+    let n = 64 * 1024 * 1024;
+    let src = Arc::new(Counting {
+        inner: MemSource::new(vec![b'x'; n]),
+        bytes: AtomicU64::new(0),
+    });
+    let doc = Document::from_source_with(
+        src.clone(),
+        "long",
+        OpenOptions {
+            follow: false,
+            ..OpenOptions::default()
+        },
+    );
+    wait_ready(&doc, n as u64);
+    let read = || src.bytes.swap(0, Ordering::Relaxed);
+    read();
+    let mib = 1024 * 1024;
+
+    let t = request(&doc, LineRequest::Tail { count: 10 });
+    assert_eq!(t.len(), 1);
+    assert!(!t[0].number_exact, "start of a cut-off tail is approximate");
+    let tail_bytes = read();
+    assert!(tail_bytes < 24 * mib, "tail read {} MiB", tail_bytes / mib);
+
+    let f = request(
+        &doc,
+        LineRequest::ByteFraction {
+            fraction: 0.5,
+            count: 1,
+        },
+    );
+    assert_eq!(f.len(), 1);
+    // Forward measurement of the one long line is inherent; the backward
+    // search and the number lookup are what must stay bounded.
+    assert!(f[0].offset >= n as u64 / 2 - 4 * mib as u64 - 64 * 1024);
+    let pos = doc.line_of_offset(n as u64 / 2).unwrap();
+    assert_eq!(pos.line, 0);
+    assert!(pos.exact);
+    assert!(!pos.start_exact);
+    let lookup_bytes = read();
+    // 2 x 4 MiB back-scans + 2 x <=64 KiB counts + the forward line
+    // measurement of the fraction request (32 MiB).
+    assert!(
+        lookup_bytes < 48 * mib,
+        "lookups read {} MiB",
+        lookup_bytes / mib
+    );
+
+    let a = request(&doc, LineRequest::AtOffsets(vec![n as u64 / 4]));
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].number, 0);
+    assert!(a[0].number_exact);
 }
