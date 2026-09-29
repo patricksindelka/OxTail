@@ -1,19 +1,19 @@
 name: Docs
 
 # Builds the user guide (docs/book, an mdBook) and publishes it to GitHub Pages.
-#   * pull requests touching the docs, xtask or the built-in profiles: check + build only
-#   * pushes to the default branch touching the same paths:            check, build, deploy
-#   * pushes to other branches are ignored
-# One-time setup: Settings > Pages > Build and deployment > Source: "GitHub Actions".
+# Opt-in, to save Actions minutes and because Pages needs setting up first:
+#   * pushes to the default branch touching the docs deploy ONLY when the
+#     repository variable PAGES_ENABLED is 'true' (Settings > Secrets and
+#     variables > Actions > Variables), after enabling Pages with
+#     Settings > Pages > Build and deployment > Source: "GitHub Actions".
+#     (Pages on a private repository needs a paid GitHub plan.)
+#   * a manual run (Actions > Docs > Run workflow) always checks and builds, and
+#     deploys when PAGES_ENABLED is 'true'.
+# The docs consistency check (gen-docs --check) also runs in CI through
+# `cargo test -p xtask`, so pull requests need nothing from this workflow.
 
 on:
   push:
-    paths:
-      - 'docs/**'
-      - 'xtask/**'
-      - 'crates/oxtail-config/profiles/**'
-      - '.github/workflows/docs.yml'
-  pull_request:
     paths:
       - 'docs/**'
       - 'xtask/**'
@@ -37,10 +37,11 @@ env:
 jobs:
   build:
     name: Check and build
-    # A branch push only counts on the default branch; PRs and manual runs always build.
+    # Manual runs always build; pushes only on the default branch with Pages enabled.
     if: >-
-      github.event_name != 'push' ||
-      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      github.event_name == 'workflow_dispatch' ||
+      (vars.PAGES_ENABLED == 'true' &&
+       github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -74,11 +75,11 @@ jobs:
           mdbook build docs/book
 
       - name: Configure Pages
-        if: github.event_name == 'push'
+        if: vars.PAGES_ENABLED == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         uses: actions/configure-pages@v5
 
       - name: Upload the site
-        if: github.event_name == 'push'
+        if: vars.PAGES_ENABLED == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         uses: actions/upload-pages-artifact@v4
         with:
           path: docs/book/book
@@ -86,7 +87,7 @@ jobs:
   deploy:
     name: Deploy to GitHub Pages
     needs: build
-    if: github.event_name == 'push'
+    if: vars.PAGES_ENABLED == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
