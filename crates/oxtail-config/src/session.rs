@@ -581,6 +581,9 @@ mod tests {
         s
     }
 
+    // Unix path semantics (`/media/usb` is not absolute on Windows); see
+    // `windows_paths` below for the drive-letter equivalents.
+    #[cfg(unix)]
     #[test]
     fn relative_storage_and_round_trip() {
         let s = sample();
@@ -596,6 +599,9 @@ mod tests {
         assert_eq!(back, s);
     }
 
+    // Unix path semantics (`/media/usb` is not absolute on Windows); see
+    // `windows_paths` below for the drive-letter equivalents.
+    #[cfg(unix)]
     #[test]
     fn stick_remounted_elsewhere_restores() {
         let json = sample().to_json(&mapper()).expect("json");
@@ -609,6 +615,9 @@ mod tests {
         );
     }
 
+    // Unix path semantics (`/media/usb` is not absolute on Windows); see
+    // `windows_paths` below for the drive-letter equivalents.
+    #[cfg(unix)]
     #[test]
     fn mapper_cases() {
         let m = mapper();
@@ -636,6 +645,9 @@ mod tests {
         assert_eq!(m.to_stored(Path::new("/a/b")), "/a/b");
     }
 
+    // Unix path semantics (`/media/usb` is not absolute on Windows); see
+    // `windows_paths` below for the drive-letter equivalents.
+    #[cfg(unix)]
     #[test]
     fn dotdot_cannot_escape_root() {
         let m = PathMapper::for_exe(Path::new("/a/b/exe"));
@@ -761,6 +773,9 @@ mod tests {
         assert_eq!(back.recent_files, vec![PathBuf::from("/var/log/a.log")]);
     }
 
+    // Unix path semantics (`/media/usb` is not absolute on Windows); see
+    // `windows_paths` below for the drive-letter equivalents.
+    #[cfg(unix)]
     #[test]
     fn installed_mode_never_relativises() {
         let exe = Path::new("/media/usb/oxtail/oxtail");
@@ -809,5 +824,71 @@ mod tests {
         let json = json.replace(&t.path().to_string_lossy().to_string(), "/nonexistent");
         let back = Session::from_json_lenient(&json, &portable);
         assert_eq!(back.tabs[0].path, logs.join("x.log"));
+    }
+
+    /// Drive-letter and UNC equivalents of the Unix-only mapper tests.
+    #[cfg(windows)]
+    mod windows_paths {
+        use super::*;
+
+        fn exe() -> &'static Path {
+            Path::new(r"C:\tools\oxtail\oxtail.exe")
+        }
+
+        #[test]
+        fn same_drive_is_relative_other_drive_absolute() {
+            let m = PathMapper::for_exe(exe());
+            assert_eq!(
+                m.to_stored(Path::new(r"C:\tools\oxtail\a.log")),
+                "@exe/a.log"
+            );
+            assert_eq!(
+                m.to_stored(Path::new(r"C:\tools\oxtail\sub\a.log")),
+                "@exe/sub/a.log"
+            );
+            assert_eq!(
+                m.to_stored(Path::new(r"C:\logs\a.log")),
+                "@exe/../../logs/a.log"
+            );
+            assert_eq!(m.to_stored(Path::new(r"D:\logs\a.log")), r"D:\logs\a.log");
+            assert_eq!(
+                m.to_stored(Path::new(r"\\server\share\a.log")),
+                r"\\server\share\a.log"
+            );
+        }
+
+        #[test]
+        fn round_trip_and_remount_on_another_drive() {
+            let m = PathMapper::for_exe(exe());
+            let stored = m.to_stored(Path::new(r"C:\logs\a.log"));
+            assert_eq!(m.from_stored(&stored), PathBuf::from(r"C:\logs\a.log"));
+            // The stick shows up as E: next time.
+            let moved = PathMapper::for_exe(Path::new(r"E:\tools\oxtail\oxtail.exe"));
+            assert_eq!(moved.from_stored(&stored), PathBuf::from(r"E:\logs\a.log"));
+        }
+
+        #[test]
+        fn dotdot_stops_at_the_drive_root() {
+            let m = PathMapper::for_exe(Path::new(r"C:\a\b\oxtail.exe"));
+            assert_eq!(
+                m.from_stored("@exe/../../../../../x"),
+                PathBuf::from(r"C:\x")
+            );
+        }
+
+        #[test]
+        fn installed_mode_never_relativises() {
+            let p = Path::new(r"C:\logs\x.log");
+            for mode in [DataMode::Installed, DataMode::Cli] {
+                assert_eq!(
+                    PathMapper::for_mode(&mode, exe()).to_stored(p),
+                    r"C:\logs\x.log"
+                );
+            }
+            assert_eq!(
+                PathMapper::for_mode(&DataMode::Portable, exe()).to_stored(p),
+                "@exe/../../logs/x.log"
+            );
+        }
     }
 }
