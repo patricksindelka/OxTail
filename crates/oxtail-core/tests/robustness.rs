@@ -6,7 +6,9 @@ mod common;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use oxtail_core::{DocEvent, Document, LineRequest, MemSource, OpenOptions, RequestId};
+use oxtail_core::{
+    DocEvent, Document, LineEnding, LineRequest, MemSource, OpenOptions, RequestId, TextEncoding,
+};
 
 use common::*;
 
@@ -181,4 +183,66 @@ fn growth_of_a_renamed_away_file_is_still_followed() {
     wait_ready(&doc, 19);
     assert!(doc.snapshot().file_missing, "still reported as missing");
     assert_eq!(lines_of(&doc), ["one", "two", "three", "four"]);
+}
+
+/// Detection looked at two bytes only and locked in UTF-8; once more data
+/// shows the file is UTF-16 the view must be rebuilt.
+#[test]
+fn encoding_is_redetected_when_the_first_sample_was_tiny() {
+    let src = Arc::new(MemSource::new(b"a\0".to_vec()));
+    let doc = Document::from_source(src.clone(), "u16");
+    wait_ready(&doc, 2);
+    assert_eq!(doc.snapshot().encoding, TextEncoding::UTF_8);
+    let g0 = doc.generation();
+    let mut rest = Vec::new();
+    for u in "bc def\nsecond line\n".encode_utf16() {
+        rest.extend_from_slice(&u.to_le_bytes());
+    }
+    src.append(&rest);
+    doc.refresh();
+    wait_event(&doc, "encoding change", |e| {
+        matches!(e, DocEvent::EncodingChanged { .. })
+    });
+    assert!(doc.generation() > g0);
+    wait_until("transcoded", || {
+        let s = doc.snapshot();
+        s.utf8_len == 20 && s.lines.exact
+    });
+    assert_eq!(doc.snapshot().encoding, TextEncoding::UTF_16LE);
+    assert!(doc.snapshot().spooled);
+    assert_eq!(lines_of(&doc), ["abc def", "second line"]);
+}
+
+/// `"a\r"` may be the first half of a CRLF; it must not lock in lone-CR mode.
+#[test]
+fn a_trailing_cr_does_not_select_cr_mode() {
+    let src = Arc::new(MemSource::new(b"a\r".to_vec()));
+    let doc = Document::from_source(src.clone(), "crlf");
+    wait_ready(&doc, 2);
+    assert_eq!(doc.snapshot().line_ending, LineEnding::Lf);
+    let g0 = doc.generation();
+    src.append(b"\nb\r\n");
+    doc.refresh();
+    wait_ready(&doc, 6);
+    let s = doc.snapshot();
+    assert_eq!(s.line_ending, LineEnding::Lf);
+    assert!(!s.spooled);
+    assert_eq!(s.generation, g0, "no rebuild needed");
+    assert_eq!(lines_of(&doc), ["a", "b"]);
+}
+
+/// A genuine classic-Mac file whose first write was a single line.
+#[test]
+fn lone_cr_is_recognised_once_a_second_line_arrives() {
+    let src = Arc::new(MemSource::new(b"a\r".to_vec()));
+    let doc = Document::from_source(src.clone(), "cr");
+    wait_ready(&doc, 2);
+    src.append(b"b\rc\r");
+    doc.refresh();
+    wait_until("cr mode", || doc.snapshot().line_ending == LineEnding::Cr);
+    wait_until("spooled view ready", || {
+        let s = doc.snapshot();
+        s.utf8_len == 6 && s.lines.exact
+    });
+    assert_eq!(lines_of(&doc), ["a", "b", "c"]);
 }

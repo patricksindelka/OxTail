@@ -907,6 +907,8 @@ struct Actor {
     opts: OpenOptions,
     choice: EncodingChoice,
     detected: Option<Detected>,
+    /// Bytes the current `detected` was based on.
+    detected_sample: usize,
     spool: Option<Spool>,
     /// Raw length accepted so far (what we know exists).
     raw_target: u64,
@@ -955,6 +957,7 @@ impl Actor {
             fingerprint: None,
             opts: setup.opts,
             detected: None,
+            detected_sample: 0,
             spool: None,
             raw_target: 0,
             raw_pos: 0,
@@ -1262,6 +1265,7 @@ impl Actor {
                 }
             }
         }
+        self.redetect_if_sample_was_thin();
         self.ensure_detected();
         if let Some(d) = &self.detected
             && d.is_passthrough()
@@ -1356,12 +1360,9 @@ impl Actor {
         self.dirty = true;
     }
 
-    /// Detects the encoding once the raw source has data, and (re)builds the
-    /// view accordingly.
-    fn ensure_detected(&mut self) {
-        if self.detected.is_some() || self.raw_target == 0 {
-            return;
-        }
+    /// Reads the detection sample (the first `SAMPLE_LEN` raw bytes that
+    /// exist). `None` after reporting a read error, or when there is nothing.
+    fn read_sample(&mut self) -> Option<Vec<u8>> {
         let want = (self.raw_target as usize).min(SAMPLE_LEN);
         let mut sample = vec![0u8; want];
         let mut got = 0;
@@ -1371,14 +1372,25 @@ impl Actor {
                 Ok(n) => got += n,
                 Err(e) => {
                     self.fail(format!("cannot read file: {e}"));
-                    return;
+                    return None;
                 }
             }
         }
-        if got == 0 {
+        sample.truncate(got);
+        (got > 0).then_some(sample)
+    }
+
+    /// Detects the encoding once the raw source has data, and (re)builds the
+    /// view accordingly.
+    fn ensure_detected(&mut self) {
+        if self.detected.is_some() || self.raw_target == 0 {
             return;
         }
-        let d = detect(&sample[..got], self.choice);
+        let Some(sample) = self.read_sample() else {
+            return;
+        };
+        let d = detect(&sample, self.choice);
+        self.detected_sample = sample.len();
         if d.is_passthrough() {
             self.spool = None;
             self.shared.view.switch(self.raw.clone());
@@ -1399,6 +1411,37 @@ impl Actor {
         }
         self.detected = Some(d);
         self.dirty = true;
+    }
+
+    /// While the detection was based on fewer than `SAMPLE_LEN` bytes, more
+    /// data may change the verdict (a file that starts with one ASCII-looking
+    /// UTF-16 unit, or with `a\r` before its `\n`). Re-runs detection when the
+    /// file has grown; a different result rebuilds the view like a manual
+    /// encoding change (new generation, `EncodingChanged`).
+    fn redetect_if_sample_was_thin(&mut self) {
+        let Some(prev) = self.detected else {
+            return;
+        };
+        if self.detected_sample >= SAMPLE_LEN || self.raw_target as usize <= self.detected_sample {
+            return;
+        }
+        let Some(sample) = self.read_sample() else {
+            return;
+        };
+        if detect(&sample, self.choice) == prev {
+            self.detected_sample = sample.len();
+            return;
+        }
+        let target = self.raw_target;
+        self.reset_pipeline();
+        self.raw_target = target;
+        self.notice = Some(Notice {
+            kind: NoticeKind::EncodingChanged,
+            at: SystemTime::now(),
+        });
+        self.shared.emit(DocEvent::EncodingChanged {
+            generation: self.shared.generation.load(Ordering::Acquire),
+        });
     }
 
     fn fail(&mut self, msg: String) {
