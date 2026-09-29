@@ -7,9 +7,9 @@
     * No file associations, no context menu entries, no PATH change. Integration is
       an opt-in action inside the app.
     * No registry writes beyond Windows Installer's own bookkeeping: the Start menu
-      shortcut needs its own component with a registry key path (ICE43/ICE57), so
-      one value is written under HKMCU\Software\OxTail (HKLM for this per-machine
-      package) and removed on uninstall.
+      shortcut needs its own component with an HKCU registry key path (ICE43/ICE57,
+      the standard WiX pattern), so one value is written under HKCU\Software\OxTail
+      for the installing user and removed on uninstall.
     * No "portable" marker: an installed copy stores settings in %APPDATA%\OxTail.
   Per-machine by default (InstallScope=perMachine, needs elevation, installs to
   Program Files). Change the folder with INSTALLFOLDER="D:\Tools\OxTail". A
@@ -51,8 +51,8 @@
     </DirectoryRef>
 
     <!-- A non-advertised shortcut must be in its own component whose key path is a
-         registry value (ICE43), and that value must not mix per-user and per-machine
-         data (ICE57): HKMCU resolves to HKLM for a per-machine install. -->
+         registry value under HKCU (ICE43); keeping only per-user data in it
+         satisfies ICE57. -->
     <DirectoryRef Id="ProgramMenuFolder">
       <Component Id="StartMenuShortcut" Guid="7aab77b3-5dde-46f2-a6e3-b0e48eff5c52" Win64="yes">
         <Shortcut Id="StartMenuShortcut"
@@ -61,7 +61,7 @@
                   Target="[#OxTailExeFile]"
                   WorkingDirectory="INSTALLFOLDER"
                   Icon="oxtail.ico" />
-        <RegistryValue Root="HKMCU" Key="Software\OxTail" Name="StartMenuShortcut"
+        <RegistryValue Root="HKCU" Key="Software\OxTail" Name="StartMenuShortcut"
                        Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </DirectoryRef>
