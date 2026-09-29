@@ -353,9 +353,10 @@ impl Parser {
         if line.len() > MAX_PARSE_LEN {
             return false;
         }
-        let line = line.strip_suffix('\r').unwrap_or(line);
+        // `parse` strips one trailing `\r` itself; strip here only for the
+        // regex fast path so both agree (a double strip broke "\r\r" lines).
         match &self.imp {
-            Imp::Regex(p) => p.is_match(line),
+            Imp::Regex(p) => p.is_match(line.strip_suffix('\r').unwrap_or(line)),
             _ => self.parse(line).is_some(),
         }
     }

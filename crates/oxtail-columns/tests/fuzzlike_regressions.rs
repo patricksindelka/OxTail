@@ -7,7 +7,6 @@ use oxtail_columns::{FixedColumn, ParserSpec};
 /// record for `parse` but not for `is_match`.
 /// Input: `"\r\r"` with a FixedWidth parser. Expected: both agree.
 #[test]
-#[ignore = "BUG: Parser::is_match and Parser::parse disagree on lines ending in \\r\\r (double CR strip)"]
 fn is_match_agrees_with_parse_on_double_cr() {
     let p = ParserSpec::FixedWidth {
         columns: vec![
