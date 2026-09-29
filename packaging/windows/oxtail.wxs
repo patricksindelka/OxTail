@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OxTail MSI (WiX Toolset v3). Built by .github/workflows/release.yml with
+    candle -arch x64 -dVersion=X.Y.Z -dBinDir=<dir with oxtail.exe> -dIconDir=packaging\icons
+    light -out oxtail-X.Y.Z-x86_64.msi
+  Rules (PLAN.md 3.1):
+    * No file associations, no context menu entries, no PATH change. Integration is
+      an opt-in action inside the app.
+    * No registry writes beyond Windows Installer's own bookkeeping (the Start menu
+      shortcut is the key path of the exe component, so no HKCU key is needed).
+    * No "portable" marker: an installed copy stores settings in %APPDATA%\OxTail.
+  Per-machine by default (InstallScope=perMachine, needs elevation, installs to
+  Program Files). Change the folder with INSTALLFOLDER="D:\Tools\OxTail". A
+  per-user install without admin rights is the portable .zip (or Scoop).
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="OxTail"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="OxTail contributors"
+           UpgradeCode="ee0bc0a5-d2a6-4e45-9b5c-dabffee0d249">
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Platform="x64"
+             Description="OxTail, a fast real-time log viewer"
+             Comments="https://github.com/patricksindelka/OxTail" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of OxTail is already installed."
+                  Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="oxtail.ico" SourceFile="$(var.IconDir)\oxtail.ico" />
+    <Property Id="ARPPRODUCTICON" Value="oxtail.ico" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/patricksindelka/OxTail" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="OxTail" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="OxTailExe" Guid="*" Win64="yes">
+        <File Id="OxTailExeFile" Name="oxtail.exe" Source="$(var.BinDir)\oxtail.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut"
+                    Directory="ProgramMenuFolder"
+                    Name="OxTail"
+                    Description="Fast real-time log viewer"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Icon="oxtail.ico"
+                    Advertise="no" />
+        </File>
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Main" Title="OxTail" Level="1">
+      <ComponentRef Id="OxTailExe" />
+    </Feature>
+  </Product>
+</Wix>

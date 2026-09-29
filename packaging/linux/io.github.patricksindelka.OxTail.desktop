@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=OxTail
+GenericName=Log Viewer
+Comment=Fast, portable, real-time log viewer
+Exec=oxtail %F
+Icon=io.github.patricksindelka.OxTail
+Terminal=false
+Categories=Utility;TextTools;
+Keywords=log;tail;logs;viewer;follow;
+# Listed in "Open With" only; OxTail never registers itself as the default handler.
+MimeType=text/x-log;text/plain;
+StartupWMClass=oxtail

@@ -1,0 +1,47 @@
+# Flatpak manifest for a later Flathub submission (not built by the release
+# workflow). Flathub builds from source without network access, so the Rust
+# dependencies are vendored through cargo-sources.json, generated with
+# flatpak-cargo-generator (https://github.com/flatpak/flatpak-builder-tools):
+#   python3 flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
+# Local test:
+#   flatpak-builder --user --install --force-clean build-dir \
+#     packaging/flatpak/io.github.patricksindelka.OxTail.yml
+app-id: io.github.patricksindelka.OxTail
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: oxtail
+finish-args:
+  # Window system: Wayland with X11 fallback (winit picks at runtime).
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # GPU for wgpu/glow; software rendering still works without it.
+  - --device=dri
+  # A log viewer must read (and follow) logs anywhere, read-only. The file picker
+  # portal (rfd/xdg-portal) covers everything else.
+  - --filesystem=host:ro
+  - --filesystem=/var/log:ro
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/oxtail/cargo
+    CARGO_NET_OFFLINE: 'true'
+modules:
+  - name: oxtail
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release --locked -p oxtail-cli
+      - install -Dm755 target/release/oxtail -t /app/bin
+      - install -Dm644 packaging/linux/io.github.patricksindelka.OxTail.desktop -t /app/share/applications
+      - install -Dm644 packaging/linux/io.github.patricksindelka.OxTail.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 packaging/icons/oxtail.svg /app/share/icons/hicolor/scalable/apps/io.github.patricksindelka.OxTail.svg
+      - install -Dm644 packaging/icons/oxtail-256.png /app/share/icons/hicolor/256x256/apps/io.github.patricksindelka.OxTail.png
+    sources:
+      - type: git
+        url: https://github.com/patricksindelka/OxTail.git
+        tag: v0.1.0
+        # commit: <sha of the tag>   (Flathub requires it; fill in on submission)
+      - cargo-sources.json

@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: OxTail.OxTail
+PackageVersion: "@VERSION@"
+InstallerLocale: en-US
+InstallerType: wix
+Scope: machine
+UpgradeBehavior: install
+ReleaseDate: "@RELEASE_DATE@"
+Installers:
+  - Architecture: x64
+    InstallerUrl: "https://github.com/patricksindelka/OxTail/releases/download/v@VERSION@/oxtail-@VERSION@-x86_64.msi"
+    InstallerSha256: "@SHA256_WINDOWS_MSI@"
+    ProductCode: "@MSI_PRODUCT_CODE@"
+ManifestType: installer
+ManifestVersion: 1.6.0

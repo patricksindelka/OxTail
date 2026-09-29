@@ -1,0 +1,407 @@
+name: Release
+
+# Builds the portable archives and installers on all three platforms.
+#   * tag push `v*`        -> build, then publish a GitHub Release
+#   * packaging changes    -> build only (branch pushes and PRs touching packaging/ or this file)
+#   * workflow_dispatch    -> build only when `dry_run` is true (the default):
+#                             artifacts are uploaded to the workflow run, nothing is published
+# Signing and notarization run only when the secrets exist; see packaging/README.md.
+
+on:
+  push:
+    tags: ['v*']
+    # Changes to the packaging get a full dry run (build everything, publish
+    # nothing): the publish job only runs for tags.
+    branches: ['**']
+    paths:
+      - '.github/workflows/release.yml'
+      - 'packaging/**'
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'packaging/**'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and upload workflow artifacts only; do not publish a GitHub Release
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.94.1
+  # Old glibc baseline (PLAN.md 3.1) and its tooling, pinned.
+  GLIBC_BASELINE: '2.28'
+  ZIGLANG_VERSION: 0.15.1
+  CARGO_ZIGBUILD_VERSION: 0.23.4
+  APPIMAGETOOL_VERSION: 1.9.0
+  NFPM_VERSION: v2.41.3
+  WIX_VERSION: 3.14.1
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
+  # NOTE: no global RUSTFLAGS. A RUSTFLAGS env var REPLACES the target rustflags in
+  # .cargo/config.toml (the Windows static CRT), so only the Windows job sets it, in full.
+
+jobs:
+  meta:
+    name: Version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      numeric_version: ${{ steps.v.outputs.numeric_version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - name: Resolve version
+        id: v
+        run: |
+          cargo_version=$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "oxtail-cli") | .version')
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [ "$version" != "$cargo_version" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match the crate version $cargo_version"
+              exit 1
+            fi
+          else
+            version="$cargo_version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # MSI and Info.plist need x.y.z without a pre-release suffix.
+          echo "numeric_version=${version%%-*}" >> "$GITHUB_OUTPUT"
+          echo "Building OxTail $version"
+
+  linux:
+    name: Linux x86_64 (glibc 2.28)
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Install zig and cargo-zigbuild
+        run: |
+          python3 -m pip install --user --break-system-packages "ziglang==$ZIGLANG_VERSION"
+          cargo install cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION" --locked
+      - name: Build (glibc ${{ env.GLIBC_BASELINE }})
+        run: cargo zigbuild --release --locked -p oxtail-cli --target "$TARGET.$GLIBC_BASELINE"
+      - name: Check dependency allowlist and glibc baseline
+        run: |
+          bin="target/$TARGET/release/oxtail"
+          cargo run -q -p xtask -- check-deps --binary "$bin"
+          newest=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+          echo "newest glibc symbol version: ${newest:-none}"
+          if [ -n "$newest" ] && [ "$(printf '%s\n%s\n' "$newest" "$GLIBC_BASELINE" | sort -V | tail -1)" != "$GLIBC_BASELINE" ]; then
+            echo "::error::binary needs glibc $newest, baseline is $GLIBC_BASELINE"
+            exit 1
+          fi
+      - name: Validate desktop file and metainfo
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq desktop-file-utils appstream
+          desktop-file-validate packaging/linux/io.github.patricksindelka.OxTail.desktop
+          appstreamcli validate --no-net packaging/linux/io.github.patricksindelka.OxTail.metainfo.xml \
+            || echo "::warning::appstreamcli reported problems (see log); fix before a Flathub submission"
+          grep -q "release version=\"$VERSION\"" packaging/linux/io.github.patricksindelka.OxTail.metainfo.xml \
+            || echo "::warning::metainfo.xml has no <release> entry for $VERSION"
+      - name: Stage files
+        run: |
+          mkdir -p dist/stage dist/out
+          cp "target/$TARGET/release/oxtail" dist/stage/oxtail
+          chmod 755 dist/stage/oxtail
+      - name: Portable tar.gz
+        run: |
+          name="oxtail-$VERSION-x86_64-linux"
+          mkdir -p "dist/$name"
+          cp dist/stage/oxtail "dist/$name/oxtail"
+          : > "dist/$name/portable"   # portable-mode marker (PLAN.md 3.2)
+          for f in README.md LICENSE*; do if [ -e "$f" ]; then cp "$f" "dist/$name/"; fi; done
+          tar -C dist --owner=0 --group=0 -czf "dist/out/$name.tar.gz" "$name"
+      - name: AppImage
+        run: |
+          id=io.github.patricksindelka.OxTail
+          appdir=dist/OxTail.AppDir
+          mkdir -p "$appdir/usr/bin" "$appdir/usr/share/metainfo" "$appdir/usr/share/icons/hicolor/256x256/apps"
+          cp dist/stage/oxtail "$appdir/usr/bin/oxtail"
+          cp packaging/linux/$id.desktop "$appdir/$id.desktop"
+          cp packaging/icons/oxtail-256.png "$appdir/$id.png"
+          cp packaging/icons/oxtail-256.png "$appdir/usr/share/icons/hicolor/256x256/apps/$id.png"
+          cp packaging/linux/$id.metainfo.xml "$appdir/usr/share/metainfo/"
+          ln -s usr/bin/oxtail "$appdir/AppRun"
+          curl -fsSL -o dist/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-x86_64.AppImage"
+          chmod +x dist/appimagetool
+          # Run without FUSE (not available on hosted runners).
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 dist/appimagetool "$appdir" "dist/out/oxtail-$VERSION-x86_64.AppImage"
+      - name: .deb and .rpm (nfpm)
+        run: |
+          go install "github.com/goreleaser/nfpm/v2/cmd/nfpm@$NFPM_VERSION"
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          for fmt in deb rpm; do
+            nfpm package -f packaging/linux/nfpm.yaml -p "$fmt" -t dist/out/
+          done
+          dpkg-deb -c dist/out/*.deb
+      - uses: actions/upload-artifact@v6
+        with:
+          name: linux-x86_64
+          path: dist/out/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows x86_64 (static CRT)
+    needs: meta
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      NUMERIC_VERSION: ${{ needs.meta.outputs.numeric_version }}
+      # Full value on purpose: this replaces the rustflags of .cargo/config.toml.
+      RUSTFLAGS: -C target-feature=+crt-static
+      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - run: cargo build --release --locked -p oxtail-cli
+      - name: Check dependency allowlist
+        run: cargo run -q -p xtask -- check-deps --binary target/release/oxtail.exe
+      - name: Stage files
+        run: |
+          mkdir -p dist/stage dist/out dist/meta
+          cp target/release/oxtail.exe dist/stage/oxtail.exe
+      - name: Sign oxtail.exe
+        if: env.WINDOWS_CERT_PFX_BASE64 != ''
+        shell: pwsh
+        run: ./packaging/windows/sign.ps1 dist\stage\oxtail.exe
+      - name: Note unsigned build
+        if: env.WINDOWS_CERT_PFX_BASE64 == ''
+        run: echo "::warning::WINDOWS_CERT_PFX_BASE64 is not set; Windows artifacts are unsigned (SmartScreen will warn)"
+      - name: Portable zip
+        run: |
+          name="oxtail-$VERSION-x86_64-windows"
+          mkdir -p "dist/zip"
+          cp dist/stage/oxtail.exe dist/zip/
+          : > dist/zip/portable   # portable-mode marker (PLAN.md 3.2)
+          for f in README.md LICENSE*; do if [ -e "$f" ]; then cp "$f" dist/zip/; fi; done
+          (cd dist/zip && 7z a -tzip -mx=9 "../out/$name.zip" ./*)
+      - name: Install WiX Toolset 3
+        shell: pwsh
+        run: |
+          $bin = "${env:ProgramFiles(x86)}\WiX Toolset v3.14\bin"
+          if (-not (Test-Path "$bin\candle.exe")) {
+            choco install wixtoolset --version=$env:WIX_VERSION --no-progress -y
+          }
+          if (-not (Test-Path "$bin\candle.exe")) { throw "WiX not found at $bin" }
+          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: MSI
+        shell: pwsh
+        run: |
+          $msi = "dist\out\oxtail-$env:VERSION-x86_64.msi"
+          candle -nologo -arch x64 "-dVersion=$env:NUMERIC_VERSION" "-dBinDir=dist\stage" "-dIconDir=packaging\icons" `
+            -out dist\oxtail.wixobj packaging\windows\oxtail.wxs
+          if ($LASTEXITCODE -ne 0) { throw 'candle failed' }
+          light -nologo -out $msi dist\oxtail.wixobj
+          if ($LASTEXITCODE -ne 0) { throw 'light failed' }
+      - name: Sign MSI
+        if: env.WINDOWS_CERT_PFX_BASE64 != ''
+        shell: pwsh
+        run: ./packaging/windows/sign.ps1 "dist\out\oxtail-$env:VERSION-x86_64.msi"
+      - name: Read MSI ProductCode (for the winget manifest)
+        shell: pwsh
+        run: |
+          $path = (Resolve-Path "dist\out\oxtail-$env:VERSION-x86_64.msi").Path
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($path, 0))
+          $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, "SELECT Value FROM Property WHERE Property='ProductCode'")
+          $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null) | Out-Null
+          $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+          $code = $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, 1)
+          if ($code -notmatch '^\{[0-9A-Fa-f-]{36}\}$') { throw "unexpected ProductCode: $code" }
+          Set-Content -NoNewline -Encoding ascii dist\meta\product-code.txt $code
+          "ProductCode: $code"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows-x86_64
+          path: dist/out/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows-meta
+          path: dist/meta/product-code.txt
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal
+    needs: meta
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      NUMERIC_VERSION: ${{ needs.meta.outputs.numeric_version }}
+      MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Build both architectures
+        run: |
+          cargo build --release --locked -p oxtail-cli --target aarch64-apple-darwin
+          cargo build --release --locked -p oxtail-cli --target x86_64-apple-darwin
+      - name: Check dependency allowlist (per architecture)
+        # check-deps reads thin Mach-O files only, so check before lipo.
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo run -q -p xtask -- check-deps --binary "target/$t/release/oxtail"
+          done
+      - name: Universal binary and .app bundle
+        run: |
+          mkdir -p dist/out
+          app=dist/OxTail.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/oxtail" \
+            target/aarch64-apple-darwin/release/oxtail target/x86_64-apple-darwin/release/oxtail
+          lipo -archs "$app/Contents/MacOS/oxtail"
+          sed "s/@VERSION@/$NUMERIC_VERSION/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
+          cp packaging/icons/oxtail.icns "$app/Contents/Resources/OxTail.icns"
+      - name: Import signing certificate
+        if: env.MACOS_CERT_P12_BASE64 != ''
+        run: |
+          kc="$RUNNER_TEMP/oxtail-signing.keychain-db"
+          kcpw=$(uuidgen)
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpw" "$kc"
+          security list-keychains -d user -s "$kc" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+      - name: Sign .app (Developer ID, hardened runtime)
+        if: env.MACOS_CERT_P12_BASE64 != ''
+        run: |
+          codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY" dist/OxTail.app
+          codesign --verify --strict --verbose=2 dist/OxTail.app
+      - name: Ad-hoc sign .app (no certificate configured)
+        if: env.MACOS_CERT_P12_BASE64 == ''
+        run: |
+          echo "::warning::MACOS_CERT_P12_BASE64 is not set; the app is only ad-hoc signed and NOT notarized (Gatekeeper will warn)"
+          codesign --force --sign - dist/OxTail.app
+      - name: Notarize and staple .app
+        if: env.MACOS_CERT_P12_BASE64 != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        run: |
+          ditto -c -k --keepParent dist/OxTail.app dist/notarize-app.zip
+          xcrun notarytool submit dist/notarize-app.zip --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait --output-format json > dist/notary-app.json
+          cat dist/notary-app.json
+          [ "$(jq -r .status dist/notary-app.json)" = Accepted ] || { echo "::error::notarization was not accepted"; exit 1; }
+          xcrun stapler staple dist/OxTail.app
+          rm dist/notarize-app.zip
+      - name: Portable zip
+        run: ditto -c -k --keepParent dist/OxTail.app "dist/out/oxtail-$VERSION-macos-universal.zip"
+      - name: DMG
+        run: |
+          mkdir dist/dmg
+          cp -R dist/OxTail.app dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname OxTail -srcfolder dist/dmg -ov -format UDZO "dist/out/oxtail-$VERSION-macos-universal.dmg"
+      - name: Sign, notarize and staple DMG
+        if: env.MACOS_CERT_P12_BASE64 != ''
+        run: |
+          dmg="dist/out/oxtail-$VERSION-macos-universal.dmg"
+          codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$dmg"
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
+            xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD" --wait --output-format json > dist/notary-dmg.json
+            cat dist/notary-dmg.json
+            [ "$(jq -r .status dist/notary-dmg.json)" = Accepted ] || { echo "::error::notarization was not accepted"; exit 1; }
+            xcrun stapler staple "$dmg"
+          else
+            echo "::warning::Apple notarization secrets are not set; DMG signed but not notarized"
+          fi
+      - name: Remove signing keychain
+        if: always() && env.MACOS_CERT_P12_BASE64 != ''
+        run: security delete-keychain "$RUNNER_TEMP/oxtail-signing.keychain-db" || true
+      - uses: actions/upload-artifact@v6
+        with:
+          name: macos-universal
+          path: dist/out/*
+          if-no-files-found: error
+
+  checksums:
+    name: Checksums and manifests
+    needs: [meta, linux, windows, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist/all
+      - name: SHA256SUMS
+        run: |
+          mkdir -p dist/release dist/manifests
+          cp dist/all/linux-x86_64/* dist/all/windows-x86_64/* dist/all/macos-universal/* dist/release/
+          (cd dist/release && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+      - name: Render winget, Homebrew and Scoop manifests
+        run: |
+          python3 packaging/render-manifests.py --version "$VERSION" --sums dist/release/SHA256SUMS \
+            --out dist/manifests --product-code "$(cat dist/all/windows-meta/product-code.txt)"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-files
+          path: dist/release/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v6
+        with:
+          name: manifests
+          path: dist/manifests
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [meta, checksums]
+    # Tags only; a manual run never publishes, dry_run or not.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-files
+          path: dist/release
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          flags=(--title "OxTail $VERSION" --generate-notes --verify-tag)
+          case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" "${flags[@]}" dist/release/*

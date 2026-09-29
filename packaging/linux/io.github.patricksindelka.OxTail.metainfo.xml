@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.patricksindelka.OxTail</id>
+  <name>OxTail</name>
+  <summary>Fast, portable, real-time log viewer</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <developer id="io.github.patricksindelka">
+    <name>The OxTail contributors</name>
+  </developer>
+  <description>
+    <p>
+      OxTail is a portable, cross-platform log viewer and a modern successor to BareTail.
+      It opens multi-gigabyte files instantly, follows them as they grow (surviving
+      truncation and rotation), searches and filters them quickly, highlights them with
+      rules and profiles, and parses lines into columns.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.patricksindelka.OxTail.desktop</launchable>
+  <url type="homepage">https://github.com/patricksindelka/OxTail</url>
+  <url type="bugtracker">https://github.com/patricksindelka/OxTail/issues</url>
+  <categories>
+    <category>Utility</category>
+    <category>TextTools</category>
+  </categories>
+  <provides>
+    <binary>oxtail</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <!-- TODO before Flathub submission: add <screenshots> (needs real captures). -->
+  <releases>
+    <release version="0.1.0" date="2026-09-29"/>
+  </releases>
+</component>

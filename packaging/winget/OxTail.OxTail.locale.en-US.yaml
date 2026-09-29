@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: OxTail.OxTail
+PackageVersion: "@VERSION@"
+PackageLocale: en-US
+Publisher: OxTail contributors
+PublisherUrl: https://github.com/patricksindelka/OxTail
+PackageName: OxTail
+PackageUrl: https://github.com/patricksindelka/OxTail
+License: MIT OR Apache-2.0
+ShortDescription: Fast, portable, real-time log viewer
+Description: OxTail opens multi-gigabyte log files instantly, follows them as they grow (surviving truncation and rotation), searches, filters and highlights them, and parses lines into columns.
+Tags:
+  - log
+  - tail
+  - viewer
+  - logs
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
