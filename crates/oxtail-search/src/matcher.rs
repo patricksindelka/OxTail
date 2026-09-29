@@ -15,8 +15,9 @@
 //! what guarantees a regex never matches across `\n` (a class like `\s` or
 //! `[^x]` could otherwise span lines in the whole-buffer scan).
 //!
-//! Regexes using `\A` / `\z` (or `(?-m)` anchors) behave differently on a
-//! whole buffer, so those are scanned line by line instead.
+//! Regexes using `\A`, `\z` or `$` behave differently on a whole buffer
+//! (`$` would stop at the `\r` of a CRLF terminator), so those are scanned
+//! line by line instead.
 //!
 //! # Whole word
 //!
@@ -129,7 +130,7 @@ pub struct Matcher {
 
 #[derive(Clone)]
 enum Engine {
-    Memmem(memmem::Finder<'static>),
+    Memmem(Box<memmem::Finder<'static>>),
     Aho(AhoCorasick),
     /// A regex used purely as a literal finder (Unicode case folding).
     Fold(Regex),
@@ -138,7 +139,7 @@ enum Engine {
 
 #[derive(Clone)]
 struct RegexEngine {
-    /// Multi-line + CRLF flavour, used to find candidates in a whole buffer.
+    /// Multi-line flavour, used to find candidates in a whole buffer.
     buffer: Regex,
     /// Plain flavour, run on a single line to verify and to locate spans.
     line: Regex,
@@ -197,7 +198,9 @@ impl Matcher {
             CaseMode::Smart => !patterns.iter().any(|p| p.chars().any(char::is_uppercase)),
         };
         let engine = if !insensitive && patterns.len() == 1 {
-            Engine::Memmem(memmem::Finder::new(patterns[0].as_bytes()).into_owned())
+            Engine::Memmem(Box::new(
+                memmem::Finder::new(patterns[0].as_bytes()).into_owned(),
+            ))
         } else if !insensitive || patterns.iter().all(|p| p.is_ascii()) {
             let ac = AhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostLongest)
@@ -361,13 +364,23 @@ fn compile_regex(query: &Query) -> Result<Matcher, SearchError> {
     // pattern (with a precise error span) and to inspect its anchors.
     let hir = regex_syntax::ParserBuilder::new()
         .multi_line(true)
-        .crlf(true)
         .utf8(false)
         .build()
         .parse(pat)
         .map_err(|e| regex_error(&e))?;
     let look = hir.properties().look_set();
-    let buffer_scan = !(look.contains(Look::Start) || look.contains(Look::End));
+    // `\A`/`\z` mean something else on a whole buffer. `$` before a `\r\n`
+    // terminator would not match in a buffer scan (the `\r` is part of the
+    // buffer but not of the line), so those patterns are scanned per line.
+    let buffer_scan = ![
+        Look::Start,
+        Look::End,
+        Look::EndLF,
+        Look::StartCRLF,
+        Look::EndCRLF,
+    ]
+    .iter()
+    .any(|l| look.contains(*l));
 
     let insensitive = match query.case {
         CaseMode::Sensitive => false,
@@ -383,7 +396,6 @@ fn compile_regex(query: &Query) -> Result<Matcher, SearchError> {
         RegexBuilder::new(&source)
             .case_insensitive(insensitive)
             .multi_line(multi_line)
-            .crlf(multi_line)
             .build()
             .map_err(|e| SearchError::InvalidRegex {
                 message: e.to_string(),
