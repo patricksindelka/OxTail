@@ -221,14 +221,46 @@ impl Settings {
                 toml::Value::Boolean(Self::defaults_for(mode).update_check),
             );
         }
+        let mut dropped: Vec<String> = Vec::new();
+        let first_err = match table.clone().try_into::<Settings>() {
+            Ok(mut s) => {
+                s.sanitize();
+                return (s, warning);
+            }
+            Err(e) => e,
+        };
+        // Per-key fallback: drop every key that is invalid on its own, so one
+        // bad value does not discard the rest of the user's settings.
+        let keys: Vec<String> = table.keys().cloned().collect();
+        for k in keys {
+            let mut single = toml::Table::new();
+            if let Some(v) = table.get(&k) {
+                single.insert(k.clone(), v.clone());
+            }
+            if let Err(e) = single.try_into::<Settings>() {
+                tracing::warn!("settings: dropping invalid key `{k}`: {e}");
+                table.remove(&k);
+                dropped.push(k);
+            }
+        }
         match table.try_into::<Settings>() {
             Ok(mut s) => {
                 s.sanitize();
-                (s, warning)
+                let msg = format!(
+                    "ignored invalid settings (defaults used): {}",
+                    dropped.join(", ")
+                );
+                (
+                    s,
+                    Some(match warning {
+                        Some(w) => format!("{w}; {msg}"),
+                        None => msg,
+                    }),
+                )
             }
-            Err(e) => (
+            Err(_) => (
                 Self::defaults_for(mode),
-                Some(format!("settings file has invalid values: {e}")),
+                Some(format!("settings file has invalid values: {first_err}")),
             ),
         }
     }
@@ -347,6 +379,17 @@ mod tests {
         assert!(!p.update_check && i.update_check);
         let (p, _) = Settings::from_toml_str("update_check = true", &DataMode::Portable);
         assert!(p.update_check);
+    }
+
+    #[test]
+    fn one_bad_key_keeps_the_rest() {
+        let (s, warn) = Settings::from_toml_str(
+            "font_size = 20.0\ntheme = \"solarized\"\n",
+            &DataMode::Portable,
+        );
+        assert_eq!(s.font_size, 20.0);
+        assert_eq!(s.theme, Settings::default().theme);
+        assert!(warn.expect("warning").contains("theme"));
     }
 
     #[test]
