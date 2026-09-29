@@ -119,6 +119,11 @@ impl FsWatcher {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
             _ => Path::new(".").to_path_buf(),
         };
+        // FSEvents does not deliver events for files reached through a
+        // symlinked directory (macOS temp dirs live under `/var` ->
+        // `/private/var`), so watch the real directory there.
+        #[cfg(target_os = "macos")]
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             match res {
                 Ok(ev) => {
@@ -176,12 +181,49 @@ mod tests {
         assert_eq!(i.current(), Duration::from_millis(250));
     }
 
-    #[test]
-    fn watcher_pokes_on_append() {
+    /// Appends to `path` until `hits` moves or 10 s pass.
+    fn append_until_poked(path: &std::path::Path, hits: &std::sync::atomic::AtomicUsize) {
         use std::io::Write;
+        use std::sync::atomic::Ordering;
+        use std::time::Instant;
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            f.write_all(b"more\n").unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_pokes_through_a_symlinked_directory() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("w.log"), b"x\n").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let Some(_w) = FsWatcher::new(&link.join("w.log"), move || {
+            h.fetch_add(1, Ordering::SeqCst);
+        }) else {
+            return; // no notify backend in this sandbox; polling covers it
+        };
+        append_until_poked(&real.join("w.log"), &hits);
+        assert!(
+            hits.load(Ordering::SeqCst) > 0,
+            "watcher never fired through a symlinked directory"
+        );
+    }
+
+    #[test]
+    fn watcher_pokes_on_append() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("w.log");
@@ -193,15 +235,7 @@ mod tests {
         }) else {
             return; // no notify backend in this sandbox; polling covers it
         };
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
-            f.write_all(b"more\n").unwrap();
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        append_until_poked(&path, &hits);
         assert!(hits.load(Ordering::SeqCst) > 0, "watcher never fired");
     }
 }
