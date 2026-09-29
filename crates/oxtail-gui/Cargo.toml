@@ -18,4 +18,17 @@ oxtail-columns = { workspace = true }
 oxtail-time = { workspace = true }
 oxtail-config = { workspace = true }
 eframe = { workspace = true }
+egui = { workspace = true }
+rfd = { workspace = true }
+pollster = { workspace = true }
+notify-rust = { workspace = true }
+crossbeam-channel = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
+tempfile = { workspace = true }
+proptest = { workspace = true }
