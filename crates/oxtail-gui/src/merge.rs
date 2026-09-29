@@ -41,6 +41,10 @@ pub struct MergeSource {
     pub doc: Arc<Document>,
     /// The file, if there is one (for saving the merged tab).
     pub path: Option<PathBuf>,
+    /// The merged view opened the document itself and must drain its
+    /// events (a document that is also shown in a tab is drained by that
+    /// tab's view).
+    pub owns: bool,
 }
 
 /// The merged order, shared between the builder (writer) and the UI and the

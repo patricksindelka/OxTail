@@ -11,6 +11,8 @@ use crate::colspec::{columns_from_table, timestamp_from_table};
 use crate::docview::{BookmarkInfo, DocView};
 use crate::guistate::SavedStructure;
 use crate::highlight::choose_profile;
+use crate::mergeview::MergedView;
+use crate::panes::PaneId;
 use crate::structure::StructureInput;
 
 /// What a tab was asked to do when its document arrives.
@@ -44,6 +46,8 @@ pub enum TabContent {
     Failed(String),
     /// The document is open.
     Ready(Box<DocView>),
+    /// Several documents merged by timestamp.
+    Merged(Box<MergedView>),
 }
 
 /// One tab.
@@ -65,6 +69,8 @@ pub struct Tab {
     /// The rules were edited and applied without saving: a profile detected
     /// later must not replace them.
     pub customized: bool,
+    /// The pane (split area) the tab is shown in.
+    pub pane: PaneId,
 }
 
 impl Tab {
@@ -79,6 +85,23 @@ impl Tab {
             content: TabContent::Opening(init),
             badge: 0,
             customized: false,
+            pane: 0,
+        }
+    }
+
+    /// The merged view, if this is a merged tab.
+    pub fn merged(&self) -> Option<&MergedView> {
+        match &self.content {
+            TabContent::Merged(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// The merged view, mutably.
+    pub fn merged_mut(&mut self) -> Option<&mut MergedView> {
+        match &mut self.content {
+            TabContent::Merged(m) => Some(m),
+            _ => None,
         }
     }
 
@@ -103,7 +126,7 @@ impl Tab {
         let base = match &self.content {
             TabContent::Opening(_) => format!("{} (opening\u{2026})", self.title),
             TabContent::Failed(_) => format!("{} (failed)", self.title),
-            TabContent::Ready(_) => self.title.clone(),
+            TabContent::Ready(_) | TabContent::Merged(_) => self.title.clone(),
         };
         if self.badge > 0 {
             format!("({}) {base}", self.badge)
@@ -245,7 +268,7 @@ pub fn build_session(
                 st.filters.clone_from(&init.filters);
                 st.search_query.clone_from(&init.search);
             }
-            TabContent::Failed(_) => {}
+            TabContent::Failed(_) | TabContent::Merged(_) => {}
         }
         s.tabs.push(st);
     }
@@ -316,6 +339,7 @@ mod tests {
             forced_profile: None,
             forced_encoding: None,
             customized: false,
+            pane: 0,
         }
     }
 

@@ -643,6 +643,12 @@ impl DocView {
             .unwrap_or(self.pos.top)
     }
 
+    /// The line the user last selected or jumped to, if any (unlike
+    /// [`DocView::cursor_offset`] it does not fall back to the top row).
+    pub fn user_cursor(&self) -> Option<u64> {
+        self.selection.map(|s| s.cursor.offset).or(self.cursor)
+    }
+
     fn view_rows(&self) -> usize {
         self.metrics.view_rows()
     }

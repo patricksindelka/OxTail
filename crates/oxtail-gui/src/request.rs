@@ -23,6 +23,9 @@ pub struct OpenRequest {
     pub profile: Option<String>,
     /// A filter query to apply as soon as the tabs open.
     pub filter: Option<String>,
+    /// Open the files as one merged tab (interleaved by timestamp) instead of
+    /// one tab each.
+    pub merge: bool,
 }
 
 impl OpenRequest {
@@ -64,6 +67,7 @@ mod tests {
             tail_lines: Some(50),
             profile: Some("nginx".into()),
             filter: None,
+            merge: true,
         };
         let text = serde_json::to_string(&r).unwrap();
         let back: OpenRequest = serde_json::from_str(&text).unwrap();
@@ -71,6 +75,7 @@ mod tests {
         assert_eq!(back.files, r.files);
         assert_eq!(back.tail_lines, Some(50));
         assert_eq!(back.profile.as_deref(), Some("nginx"));
+        assert!(back.merge);
     }
 
     #[test]
@@ -78,6 +83,7 @@ mod tests {
         let r: OpenRequest = serde_json::from_str(r#"{"files":["x.log"]}"#).unwrap();
         assert_eq!(r.files.len(), 1);
         assert!(r.tail_lines.is_none());
+        assert!(!r.merge);
         assert!(!r.is_empty());
         assert!(OpenRequest::default().is_empty());
     }

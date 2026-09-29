@@ -37,12 +37,15 @@
 
 pub mod alerts;
 pub mod app;
+pub mod appmerge;
+pub mod appsplit;
 pub mod appui;
 pub mod chooser;
 pub mod collayout;
 pub mod colors;
 pub mod colspec;
 pub mod colui;
+pub mod cross;
 pub mod detail;
 pub mod docscan;
 pub mod docview;
@@ -58,9 +61,12 @@ pub mod keymap;
 pub mod linecache;
 pub mod logview;
 pub mod merge;
+pub mod mergepaint;
+pub mod mergeview;
 pub mod minimap;
 pub mod panels;
 pub mod panes;
+pub mod panesui;
 pub mod persist;
 pub mod qfilter;
 pub mod request;
