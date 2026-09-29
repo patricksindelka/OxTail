@@ -41,7 +41,7 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo clippy --workspace --all-targets
-      - run: cargo test --workspace
+      - run: cargo test --workspace --no-fail-fast
 
   portability:
     timeout-minutes: 45
