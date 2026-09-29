@@ -100,10 +100,8 @@ guide.
 The user guide is an [mdBook](https://rust-lang.github.io/mdBook/) in
 [`docs/book`](docs/book/src/introduction.md). It covers installation, following,
 search, filters, profiles, columns, time, shortcuts, the command line, settings,
-themes and troubleshooting, and it has the generated profile gallery. It is
-published to GitHub Pages by `.github/workflows/docs.yml` (once Pages is enabled
-for the repository, at <https://patricksindelka.github.io/OxTail/>). To read it
-locally:
+themes and troubleshooting, and it has the generated profile gallery. Read the
+Markdown sources on GitHub, or build it locally:
 
 ```sh
 mdbook serve docs/book --open

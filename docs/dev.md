@@ -89,8 +89,9 @@ To add a gallery example, put `name.toml` (starting with a `#` comment that
 describes it) in `docs/profiles/`, sample lines in `docs/profiles/samples/name.log`,
 and run `cargo xtask gen-docs`. To build the book, install
 [mdBook](https://rust-lang.github.io/mdBook/) and run `mdbook build docs/book`
-(output in `docs/book/book`, which is git-ignored); `.github/workflows/docs.yml`
-pins the version CI uses.
+(output in `docs/book/book`, which is git-ignored); the book was last checked
+with mdBook 0.5.2. CI does not build the book, but `cargo test -p xtask` checks
+the gallery and every profile.
 
 ## Known platform gaps
 
