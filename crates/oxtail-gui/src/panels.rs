@@ -204,6 +204,7 @@ pub fn filter_panel(ui: &mut Ui, tab_id: u64, view: &mut DocView, colors: &Color
         }
         if ui.button("Add").clicked() {
             view.filter.entries.push(FilterEntry::default());
+            view.filter.focus_last = true;
         }
         if ui.button("Clear").clicked() {
             view.filter.entries.clear();
@@ -221,6 +222,8 @@ pub fn filter_panel(ui: &mut Ui, tab_id: u64, view: &mut DocView, colors: &Color
     let problems = view.filter.problems.clone();
     let mut typed = false;
     let mut toggled = false;
+    let focus_last = std::mem::take(&mut view.filter.focus_last);
+    let last = view.filter.entries.len().saturating_sub(1);
     for (i, e) in view.filter.entries.iter_mut().enumerate() {
         ui.horizontal(|ui| {
             toggled |= ui.checkbox(&mut e.enabled, "").changed();
@@ -242,6 +245,9 @@ pub fn filter_panel(ui: &mut Ui, tab_id: u64, view: &mut DocView, colors: &Color
                 .desired_width(260.0)
                 .show(ui)
                 .response;
+            if focus_last && i == last {
+                resp.request_focus();
+            }
             typed |= resp.changed();
             if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 toggled = true;

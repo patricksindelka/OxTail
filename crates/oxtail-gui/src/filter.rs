@@ -191,6 +191,8 @@ pub struct FilterState {
     pub set: Arc<MatchSet>,
     /// Latest job status.
     pub status: SearchStatus,
+    /// Focus the text field of the last entry on the next frame.
+    pub focus_last: bool,
     /// While set and in the future, edits do not restart the job yet
     /// (the user is still typing).
     pub hold_until: Option<Instant>,
@@ -217,6 +219,7 @@ impl Default for FilterState {
                 truncated: false,
                 io_errors: 0,
             },
+            focus_last: false,
             hold_until: None,
             epoch: 0,
             active: None,

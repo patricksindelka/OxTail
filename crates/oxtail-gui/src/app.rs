@@ -929,6 +929,15 @@ impl OxTailApp {
         self.bump_style();
     }
 
+    /// Chooses a theme (and schedules saving the settings).
+    pub fn set_theme(&mut self, choice: oxtail_config::ThemeChoice) {
+        self.settings.theme = choice;
+        if let Some(ctx) = self.ctx.clone() {
+            self.apply_theme(&ctx);
+        }
+        self.mark_settings_dirty();
+    }
+
     fn follow_system_theme(&mut self, ctx: &Context) {
         if self.settings.theme != oxtail_config::ThemeChoice::System {
             return;
@@ -1098,6 +1107,8 @@ impl OxTailApp {
                     view.find.open = true;
                     view.find.focus = true;
                 } else {
+                    // Matches are only painted while the bar is open.
+                    view.find.open = true;
                     let dir = if action == Action::FindNext {
                         Dir::Next
                     } else {
@@ -1118,6 +1129,9 @@ impl OxTailApp {
                     view.filter
                         .entries
                         .push(crate::filter::FilterEntry::default());
+                }
+                if view.filter.open {
+                    view.filter.focus_last = true;
                 }
             }
             Action::ToggleBookmark => view.toggle_bookmark(),

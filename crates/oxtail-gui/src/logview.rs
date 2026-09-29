@@ -357,15 +357,22 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     let hl = Rc::clone(&view.hl);
     let galleys = Rc::clone(&view.galleys);
     galleys.borrow_mut().begin_frame();
-    let matcher = view.find.matcher.clone();
+    // Matches are painted only while the find bar is open.
+    let matcher = if view.find.open {
+        view.find.matcher.clone()
+    } else {
+        None
+    };
     let epoch = env
         .style_epoch
         .wrapping_mul(1_000_003)
         .wrapping_add(hl.borrow().epoch)
         .wrapping_mul(1_000_003)
-        .wrapping_add(view.find.epoch);
+        .wrapping_add(view.find.epoch)
+        .wrapping_mul(2)
+        .wrapping_add(u64::from(view.find.open));
     let set = view.active_set();
-    let current = view.find.current;
+    let current = view.find.open.then_some(view.find.current).flatten();
     let lopts = LayoutOpts {
         colors,
         font: font.clone(),

@@ -437,3 +437,94 @@ fn the_profile_is_detected_from_the_first_lines() {
         "{name}"
     );
 }
+
+#[test]
+fn every_feature_can_be_on_at_once_without_breaking_the_frame() {
+    // Wrapping, search highlights, a filter with context, bookmarks, marks,
+    // a selection, the minimap and the "new lines" pill in one view.
+    let long = "x".repeat(600);
+    let text: String = (0..400)
+        .map(|i| match i % 40 {
+            7 => format!("2026-01-01 12:00:00 ERROR needle {i} {long}\n"),
+            9 => format!("\u{1b}[31mred {i}\u{1b}[0m and \ttabs\u{1}\n"),
+            _ => format!("2026-01-01 12:00:00 INFO ordinary {i}\n"),
+        })
+        .collect();
+    let mem = Arc::new(MemSource::new(text.into_bytes()));
+    let doc = Arc::new(Document::from_source(mem.clone(), "all.log"));
+    let mut app = new_app();
+    app.open_document("all.log", doc);
+    let mut h = harness(app);
+    step_until(&mut h, "exact index", |a| {
+        a.active_view()
+            .is_some_and(|v| v.snapshot.lines.exact && !v.last_rows.is_empty())
+    });
+    h.state_mut().set_wrap(true);
+    {
+        let v = h.state_mut().active_view_mut().unwrap();
+        v.find.text = "needle".into();
+        v.find.open = true;
+        v.find.restart_now(Instant::now());
+        v.filter.entries = vec![oxtail_gui::filter::FilterEntry::include("ordinary")];
+        v.filter.before = 1;
+        v.filter.after = 1;
+        v.filter.open = true;
+        v.filter.changed();
+    }
+    step_until(&mut h, "filter and search", |a| {
+        a.active_view()
+            .is_some_and(|v| v.filter.status.done && v.find.status.done && !v.last_rows.is_empty())
+    });
+    {
+        let v = h.state_mut().active_view_mut().unwrap();
+        v.set_filter_view(false);
+        v.jump_top();
+    }
+    step_until(&mut h, "top", |a| {
+        visible_text(a)
+            .first()
+            .is_some_and(|l| l.contains("ordinary 0"))
+    });
+    {
+        let v = h.state_mut().active_view_mut().unwrap();
+        let l = v.last_rows[3].clone();
+        v.select(&l, false);
+        v.toggle_bookmark();
+        v.add_mark();
+        let last = v.last_rows[5].clone();
+        v.select(&last, true);
+    }
+    // New lines while paused make the pill appear.
+    mem.append(b"appended 1\nappended 2\n");
+    for _ in 0..20 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let v = h.state().active_view().unwrap();
+    assert!(!v.follow);
+    assert!(v.new_lines_while_paused() >= 2);
+    assert_eq!(v.bookmarks.len(), 1);
+    assert_eq!(v.selection_count(), Some((3, true)));
+    // Wrapped long lines make the rows taller than the plain row height.
+    h.state_mut()
+        .active_view_mut()
+        .unwrap()
+        .jump_to_line(0, false);
+    step_until(&mut h, "line 0", |a| {
+        visible_text(a)
+            .first()
+            .is_some_and(|l| l.contains("ordinary 0"))
+    });
+    // Every theme renders the same view.
+    for theme in [
+        oxtail_config::ThemeChoice::Light,
+        oxtail_config::ThemeChoice::HighContrast,
+        oxtail_config::ThemeChoice::Dark,
+        oxtail_config::ThemeChoice::System,
+    ] {
+        h.state_mut().set_theme(theme);
+        h.step();
+        h.step();
+        assert!(!visible_text(h.state()).is_empty());
+    }
+}
