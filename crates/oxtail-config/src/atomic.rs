@@ -1,7 +1,7 @@
 //! Atomic file replacement.
 
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -80,7 +80,7 @@ fn sync_parent(path: &Path) {
         } else {
             dir
         };
-        if let Ok(d) = File::open(dir) {
+        if let Ok(d) = fs::File::open(dir) {
             let _ = d.sync_all();
         }
     }
