@@ -63,3 +63,13 @@ On Windows a dynamic C runtime (`vcruntime*`, `msvcp*`, `ucrtbase`,
 `api-ms-win-crt-*`) is denied: build with `-C target-feature=+crt-static`
 (set in `.cargo/config.toml`). On Linux, X11/Wayland/GL/Vulkan must be
 dlopen'ed, never `DT_NEEDED`.
+
+## Known platform gaps
+
+- **macOS: no instant wake-up on appends.** notify's FSEvents backend delivered
+  no events for appends to an already-open log file on `macos-latest` CI
+  runners (tried: canonical directory, non-recursive and recursive watches).
+  Following still works through the adaptive poll (250 ms, backing off to
+  1 s), and the real-file follow tests pass on macOS. The two unit tests that
+  assert an append event are ignored on macOS. Next step: investigate on real
+  hardware, e.g. notify's kqueue backend for the followed file itself.
