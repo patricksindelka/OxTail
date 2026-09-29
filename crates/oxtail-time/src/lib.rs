@@ -13,6 +13,7 @@
 //! touches the file system, so everything is testable without I/O.
 
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 mod detect;
 mod find;

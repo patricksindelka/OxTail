@@ -1,0 +1,27 @@
+# JSON Lines: one JSON object per line.
+name = "JSON lines"
+match_files = ["*.jsonl", "*.ndjson", "*.jsonl.*", "*.ndjson.*"]
+match_content = '^\s*\{\s*"'
+
+[columns]
+parser = "jsonl"
+order = ["time", "timestamp", "ts", "level", "msg", "message", "*"]
+
+[timestamp]
+column = "time"
+format = "auto"
+
+[[rules]]
+name = "error level"
+match = { column = "level", op = "eq", value = "error" }
+scope = "line"
+style = { bg = "error.subtle" }
+priority = 20
+alert = false
+
+[[rules]]
+name = "warn level"
+match = { column = "level", op = "eq", value = "warn" }
+scope = "line"
+style = { bg = "warn.subtle" }
+priority = 10

@@ -1,0 +1,33 @@
+# logfmt: key=value pairs (Go services, Heroku, ...).
+name = "logfmt"
+match_files = ["*.logfmt"]
+match_content = '^(\w[\w.\-]*=("[^"]*"|\S*)\s+){2,}'
+
+[columns]
+parser = "logfmt"
+order = ["time", "ts", "level", "msg", "*"]
+
+[timestamp]
+column = "time"
+format = "auto"
+
+[[rules]]
+name = "error level"
+match = { column = "level", op = "eq", value = "error" }
+scope = "line"
+style = { bg = "error.subtle" }
+priority = 20
+
+[[rules]]
+name = "warn level"
+match = { column = "level", op = "eq", value = "warn" }
+scope = "line"
+style = { bg = "warn.subtle" }
+priority = 10
+
+[[rules]]
+name = "slow durations"
+match = { regex = '\bduration=(\d{4,})ms' }
+scope = "group:1"
+style = { fg = "warn", bold = true }
+priority = 5
