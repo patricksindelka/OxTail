@@ -94,25 +94,28 @@ fn a_merged_tab_follows_growth_of_its_sources() {
     ma.append(b"2026-09-29 10:01:00 a-late\n");
     mb.append(b"2026-09-29 10:01:01 b-late\n");
     step_until(&mut h, "new lines merged in", |a| merged(a).len() == 12);
-    step_until(&mut h, "tail visible", |a| {
+    // Each source notices its growth on its own, and a source that has been
+    // quiet longer than the idle delay no longer holds the others back, so the
+    // two late lines can be merged in either order (seen on macos-latest).
+    // What matters: the view follows to the tail and shows both of them.
+    let late = |a: &OxTailApp, suffix: &str| {
         merged(a)
             .last_rows
             .iter()
-            .any(|(_, l)| l.as_ref().is_some_and(|l| l.line.text.ends_with("b-late")))
+            .any(|(_, l)| l.as_ref().is_some_and(|l| l.line.text.ends_with(suffix)))
+    };
+    step_until(&mut h, "tail visible", |a| {
+        let m = merged(a);
+        m.last_rows
+            .last()
+            .is_some_and(|(i, l)| *i == 11 && l.is_some())
+            && late(a, "a-late")
+            && late(a, "b-late")
     });
     let m = merged(h.state());
     assert!(m.follow);
-    assert!(
-        m.last_rows
-            .last()
-            .unwrap()
-            .1
-            .as_ref()
-            .unwrap()
-            .line
-            .text
-            .ends_with("b-late")
-    );
+    let last = m.last_rows.last().unwrap().1.as_ref().unwrap();
+    assert!(last.line.text.ends_with("-late"), "{}", last.line.text);
 }
 
 #[test]
