@@ -486,6 +486,23 @@ pub fn status_bar(ui: &mut Ui, view: &mut DocView, profiles: &ProfileSet) -> Sta
         }
         ui.separator();
 
+        // Columns: the format in use, and the table switch.
+        if view.st.parser.is_some() {
+            let mut table = view.table_active();
+            if ui
+                .toggle_value(&mut table, "Columns")
+                .on_hover_text(format!(
+                    "{}\nShow this file as a table of columns",
+                    view.st.name
+                ))
+                .changed()
+            {
+                view.set_table(table);
+            }
+        } else if view.st.is_deciding() {
+            ui.label(RichText::new("Looking for columns\u{2026}").weak());
+        }
+
         // Profile switcher.
         let current = view
             .hl

@@ -20,7 +20,8 @@ ARGS:
 OPTIONS:
     -n, --lines N        Start with the last N lines instead of the default tail view
         --profile NAME   Highlight profile for the opened files
-        --filter QUERY   Filter the opened files (only lines containing QUERY)
+        --filter QUERY   Filter the opened files (only lines containing QUERY; start
+                         with ? for a column query, e.g. '?level:ERROR status>=500')
         --merge          Open all the files as one merged tab, interleaved by timestamp
         --data-dir PATH  Use PATH as the data folder (settings, profiles, session)
         --renderer R     auto (default), wgpu or glow

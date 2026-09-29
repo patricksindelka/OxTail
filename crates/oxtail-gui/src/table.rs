@@ -267,7 +267,8 @@ pub fn draw_header(
             cp.rect_filled(visible, CornerRadius::ZERO, colors.gutter_bg);
         }
         let resp = ui.interact(
-            visible.with_max_x(visible.right() - RESIZE_GRAB * 0.5),
+            // Leave the resize grab zones (either side of the divider) free.
+            visible.shrink2(vec2(RESIZE_GRAB * 0.5, 0.0)),
             id.with(("cell", p.col)),
             Sense::click_and_drag(),
         );
