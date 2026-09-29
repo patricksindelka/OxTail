@@ -47,3 +47,57 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p oxtail-cli
       - run: cargo run -q -p xtask -- check-deps --binary target/release/oxtail${{ runner.os == 'Windows' && '.exe' || '' }}
+
+  fuzz-build:
+    # cargo-fuzz needs nightly (sanitizer flags). The build must pass.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - name: Build all fuzz targets
+        working-directory: fuzz
+        run: cargo fuzz build
+
+  fuzz-smoke:
+    # Short timed runs of every target. Findings are reported but do not fail
+    # the build (continue-on-error); crash artifacts are uploaded.
+    needs: fuzz-build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - index_vs_naive
+          - transcoder
+          - read_lines
+          - search_matcher
+          - highlight_rules
+          - ansi_parse
+          - time_detect
+          - config_session_json
+          - config_settings_toml
+          - columns_parsers
+          - columns_detect
+          - columns_query
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - name: Fuzz ${{ matrix.target }} for 30 s
+        working-directory: fuzz
+        continue-on-error: true
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=30 -rss_limit_mb=2048
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
