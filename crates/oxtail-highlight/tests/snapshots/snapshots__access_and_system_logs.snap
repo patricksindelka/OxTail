@@ -1,0 +1,9 @@
+---
+source: crates/oxtail-highlight/tests/snapshots.rs
+expression: "render(&[r#\"203.0.113.7 - - [29/Sep/2026:12:00:01 +0000] \"GET /api/v1/users?id=42 HTTP/1.1\" 200 612 \"-\" \"curl/8.0\"\"#,\nr#\"198.51.100.2 - bob [29/Sep/2026:12:00:02 +0000] \"POST /login HTTP/1.1\" 503 0\"#,\nr#\"127.0.0.1 \"DELETE /x HTTP/1.1\" 404 9\"#,\n\"Sep 29 12:00:01 host sshd[123]: Failed password for root from 10.0.0.1 port 22 ssh2\",\n\"1759147201123 epoch millis event\",])"
+---
+[accent3|203.0.113.7] - - [[accent7|29]/Sep/[accent7|2026]:[muted|12:00:01] +[accent7|0000]] "[accent1+b|GET] [accent6|/api/v1/users]?id=[accent7|42] HTTP/[accent7|1.1]" [success|200] [accent7|612] "-" "curl/[accent7|8.0]"
+[accent3|198.51.100.2] - bob [[accent7|29]/Sep/[accent7|2026]:[muted|12:00:02] +[accent7|0000]] "[accent1+b|POST] /login HTTP/[accent7|1.1]" [error+b|503] [accent7|0]
+[accent3|127.0.0.1] "[accent1+b|DELETE] /x HTTP/[accent7|1.1]" [warn+b|404] [accent7|9]
+[muted|Sep 29 12:00:01] host sshd[[accent7|123]]: Failed password for root from [accent3|10.0.0.1] port [accent7|22] ssh2
+[muted|1759147201123] epoch millis event

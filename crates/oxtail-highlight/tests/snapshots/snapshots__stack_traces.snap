@@ -1,0 +1,13 @@
+---
+source: crates/oxtail-highlight/tests/snapshots.rs
+expression: "render(&[\"java.lang.NullPointerException: Cannot invoke \\\"String.length()\\\"\",\n\"\\tat com.foo.Bar.baz(Bar.java:42)\",\n\"    at org.springframework.web.Servlet.service(Servlet.java:733)\",\n\"Caused by: java.io.IOException: disk full\",\n\"Traceback (most recent call last):\", \"  File \\\"app.py\\\", line 12, in main\",\n\"thread 'main' panicked at src/main.rs:4:5:\",])"
+---
+[error+b|java.lang.NullPointerException]: Cannot invoke "String.length()"
+[muted|	at com.foo.Bar.baz(Bar.java:42)]
+[muted|    at org.springframework.web.Servlet.service(Servlet.java:733)]
+[error+b|Caused by:] [error+b|java.io.IOException]: disk full
+[error+b|Traceback (most recent call last):]
+  (minimap=error)
+[muted|  File "app.py", line 12, in main]
+thread 'main' [error+b|panicked at] src/main.rs:[accent7|4]:[accent7|5]:
+  (minimap=error, gutter=error)

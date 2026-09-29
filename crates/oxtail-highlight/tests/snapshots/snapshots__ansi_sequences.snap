@@ -1,0 +1,8 @@
+---
+source: crates/oxtail-highlight/tests/snapshots.rs
+expression: out
+---
+[error|ERROR] plain [success+b|ok]
+[#ff8700|orange] [#0a141e|rgb] [/info.subtle+u|under]
+cleared line home
+[error|truncated ]

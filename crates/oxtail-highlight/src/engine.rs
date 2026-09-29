@@ -384,7 +384,7 @@ impl CompiledRules {
                 continue;
             };
             if eval_column(test, &line[range.clone()]) {
-                self.apply(&mut acc, ri, &[range.clone()], &cols);
+                self.apply(&mut acc, ri, std::slice::from_ref(range), &cols);
             }
         }
 

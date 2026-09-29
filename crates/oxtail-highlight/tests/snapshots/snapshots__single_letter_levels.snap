@@ -1,0 +1,13 @@
+---
+source: crates/oxtail-highlight/tests/snapshots.rs
+expression: "render(&[\"09-29 12:00:01.123  1234  5678 E AndroidRuntime: boom\",\n\"09-29 12:00:01.123  1234  5678 W Tag: careful\", \"12:00:00 [I] started\",\n\"12:00:00 [W] slow disk\", \"12:00:00 [E] crashed\",])"
+---
+[accent7|09]-[accent7|29] [muted|12:00:01.123]  [accent7|1234]  [accent7|5678][error+b| E ]AndroidRuntime: boom
+  (minimap=error, gutter=error)
+[accent7|09]-[accent7|29] [muted|12:00:01.123]  [accent7|1234]  [accent7|5678][warn+b| W ]Tag: careful
+  (minimap=warn, gutter=warn)
+[muted|12:00:00] [info|[I]] started
+[muted|12:00:00] [warn+b|[W]] slow disk
+  (minimap=warn, gutter=warn)
+[muted|12:00:00] [error+b|[E]] crashed
+  (minimap=error, gutter=error)

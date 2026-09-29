@@ -182,10 +182,11 @@ pub fn http() -> Vec<Rule> {
     rules
 }
 
-/// Decimal and hexadecimal numbers (lowest priority).
+/// Decimal and hexadecimal numbers, also when followed by a unit (`250ms`);
+/// lowest priority.
 pub fn numbers() -> Vec<Rule> {
     vec![
-        Rule::regex("number", r"\b0x[0-9a-fA-F]+\b|\b\d+(?:\.\d+)?\b")
+        Rule::regex("number", r"\b0x[0-9a-fA-F]+|\b\d+(?:\.\d+)?")
             .styled(fg(S::Accent7))
             .with_priority(-10),
     ]
