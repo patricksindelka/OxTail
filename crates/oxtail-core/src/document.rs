@@ -77,6 +77,9 @@ const MAX_REQUEST_LINES: usize = 20_000;
 const MAX_RESPONSE_TEXT: usize = 8 * 1024 * 1024;
 /// A file counts as "being written" for this long after its last growth.
 const WRITING_WINDOW: Duration = Duration::from_secs(3);
+/// Wait before rebuilding a spool that hit a write error (avoids a rebuild
+/// loop, and a generation bump per poll, while the disk stays full).
+const SPOOL_RETRY_GAP: Duration = Duration::from_secs(1);
 /// Minimum spacing between actor polls triggered by watcher pokes.
 const MIN_POLL_GAP: Duration = Duration::from_millis(20);
 /// Minimum spacing between `IndexProgress` events / snapshot publishes.
@@ -523,6 +526,9 @@ pub struct Document {
 
 /// Everything the actor thread needs to start.
 struct Setup {
+    /// Test hook, see `Spool::fault`.
+    #[cfg(test)]
+    spool_fault: Option<Arc<std::sync::atomic::AtomicUsize>>,
     raw: Arc<dyn ReadAt>,
     file: Option<Arc<FileSource>>,
     opts: OpenOptions,
@@ -559,6 +565,8 @@ impl Document {
             name,
             Some(path),
             Setup {
+                #[cfg(test)]
+                spool_fault: None,
                 raw: file.clone(),
                 file: Some(file),
                 opts,
@@ -585,6 +593,8 @@ impl Document {
             name.into(),
             None,
             Setup {
+                #[cfg(test)]
+                spool_fault: None,
                 raw: src,
                 file: None,
                 opts,
@@ -624,6 +634,8 @@ impl Document {
             name.into(),
             None,
             Setup {
+                #[cfg(test)]
+                spool_fault: None,
                 raw,
                 file: None,
                 opts: OpenOptions::default(),
@@ -931,6 +943,11 @@ struct Actor {
     stalled: bool,
     initialised: bool,
     initial_tail: Option<usize>,
+    /// Test hook, see `Spool::fault`.
+    #[cfg(test)]
+    spool_fault: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    /// Earliest time a poisoned spool may be rebuilt.
+    spool_retry_at: Instant,
     /// Samples of the consumed raw bytes, to notice silent rewrites.
     fingerprint: Option<Fingerprint>,
     /// Tail requests waiting for the spool to catch up.
@@ -955,6 +972,9 @@ impl Actor {
             initial_tail: setup.opts.start_at_tail,
             parked: Vec::new(),
             fingerprint: None,
+            spool_retry_at: now,
+            #[cfg(test)]
+            spool_fault: setup.spool_fault,
             opts: setup.opts,
             detected: None,
             detected_sample: 0,
@@ -1180,7 +1200,8 @@ impl Actor {
     }
 
     fn has_work(&self) -> bool {
-        if self.stalled {
+        if self.stalled || self.spool.as_ref().is_some_and(Spool::is_poisoned) {
+            // (A poisoned spool waits for the rebuild in `poll`.)
             return false;
         }
         (self.spool.is_some() && self.raw_pos < self.raw_target) || self.indexed < self.view_len
@@ -1208,6 +1229,20 @@ impl Actor {
         } else {
             FollowMode::Handle
         };
+        if self.spool.as_ref().is_some_and(Spool::is_poisoned)
+            && Instant::now() >= self.spool_retry_at
+        {
+            // A failed spool write left the transcoder ahead of the file:
+            // discard the spool and start over (new generation).
+            self.reset_pipeline();
+            self.notice = Some(Notice {
+                kind: NoticeKind::EncodingChanged,
+                at: SystemTime::now(),
+            });
+            self.shared.emit(DocEvent::EncodingChanged {
+                generation: self.shared.generation.load(Ordering::Acquire),
+            });
+        }
         let checked = !(self.initialised && !self.opts.follow && self.raw_target != 0);
         let change = if checked {
             classify(mode, path_state, self.raw_target, cur_len)
@@ -1396,7 +1431,11 @@ impl Actor {
             self.shared.view.switch(self.raw.clone());
         } else {
             match Spool::new(self.opts.spool_dir.as_deref(), d.encoding, d.line_ending) {
-                Ok(s) => {
+                Ok(mut s) => {
+                    #[cfg(test)]
+                    {
+                        s.fault = self.spool_fault.clone();
+                    }
                     self.shared.view.switch(s.source());
                     self.spool = Some(s);
                 }
@@ -1488,6 +1527,9 @@ impl Actor {
             return;
         };
         if let Err(e) = spool.append(&self.buf[..got]) {
+            // The transcoder moved on without the bytes: rebuild the view
+            // from scratch at a later poll (see `poll`).
+            self.spool_retry_at = Instant::now() + SPOOL_RETRY_GAP;
             self.fail(format!("spool write failed: {e}"));
             return;
         }
@@ -1623,5 +1665,58 @@ impl Actor {
             file_missing: self.missing,
         };
         *self.shared.snapshot.write() = Arc::new(snap);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    fn utf16le(text: &str) -> Vec<u8> {
+        text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    /// A spool write that fails half way must not leave a corrupt view: the
+    /// spool is rebuilt from the raw file and the result is exact.
+    #[test]
+    fn failed_spool_write_is_recovered_by_rebuilding() {
+        let mut text = String::new();
+        for i in 0..200 {
+            text.push_str(&format!("entry number {i}\n"));
+        }
+        let raw = utf16le(&text);
+        let fault = Arc::new(AtomicUsize::new(1));
+        let doc = Document::spawn(
+            "faulty".into(),
+            None,
+            Setup {
+                spool_fault: Some(fault.clone()),
+                raw: Arc::new(crate::source::MemSource::new(raw)),
+                file: None,
+                opts: OpenOptions::default(),
+                source_open: None,
+                keep_alive: Vec::new(),
+            },
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let want_len = text.len() as u64;
+        loop {
+            let s = doc.snapshot();
+            if s.generation > 0 && s.utf8_len == want_len && s.lines.exact {
+                break;
+            }
+            assert!(Instant::now() < deadline, "never recovered: {s:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(fault.load(Ordering::SeqCst), 0, "the fault was injected");
+        // The view holds exactly the transcoded text, no stray bytes.
+        assert_eq!(doc.source().len().unwrap(), want_len);
+        let lines = doc.read_lines_blocking(0, 1000);
+        assert_eq!(lines.len(), 200);
+        for (i, l) in lines.iter().enumerate() {
+            assert_eq!(l.text, format!("entry number {i}"));
+        }
     }
 }
