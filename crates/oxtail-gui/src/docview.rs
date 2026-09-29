@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use oxtail_core::{
     DocEvent, DocSnapshot, DocState, Document, EncodingChoice, Line, LineRequest, RequestId,
 };
+use oxtail_config::TimezoneSetting;
 use oxtail_search::MatchSet;
 
 use crate::filter::FilterState;
@@ -26,6 +27,8 @@ use crate::linecache::{DEFAULT_CAPACITY, LineCache};
 use crate::scroll::{
     Fetch, OVERSCAN_ROWS, Pos, RowSpace, Visible, layout_rows, plan_fetch, scroll_by, tail_position,
 };
+use crate::structure::{Structure, StructureInput, StructureResult};
+use crate::table::TableCache;
 use crate::viewport::{ScrollSpace, bytes_target, lines_target};
 
 /// How long a read may stay outstanding before it is asked for again.
@@ -265,6 +268,14 @@ pub struct DocView {
     pub last_rows: Vec<Arc<Line>>,
     /// The scrollbar thumb is being dragged at this position.
     pub thumb_drag: Option<f64>,
+    /// Column structure: parser, table view, layout, time parser.
+    pub st: Structure,
+    /// Laid-out table cells.
+    pub tcache: TableCache,
+    /// The time zone setting the structure was built with.
+    pub tz_setting: TimezoneSetting,
+    /// The detail pane (selected record as key/value list) is open.
+    pub detail_open: bool,
     pending: HashMap<RequestId, Pending>,
     back_attempts: HashMap<u64, u32>,
     pending_px: f32,
@@ -319,6 +330,10 @@ impl DocView {
             },
             last_rows: Vec::new(),
             thumb_drag: None,
+            st: Structure::new(),
+            tcache: TableCache::default(),
+            tz_setting: TimezoneSetting::default(),
+            detail_open: false,
             pending: HashMap::new(),
             back_attempts: HashMap::new(),
             pending_px: 0.0,
@@ -336,6 +351,114 @@ impl DocView {
             was_exact: false,
             alert_next: None,
         }
+    }
+
+    // ------------------------------------------------------------- structure
+
+    /// Starts deciding the column structure on a worker thread (see
+    /// [`crate::structure`]). `wake` requests a repaint when it is done.
+    pub fn begin_structure(
+        &mut self,
+        input: StructureInput,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        if let Some(tz) = &input.tz {
+            self.tz_setting = tz.clone();
+        }
+        self.st.begin(&self.doc, input, wake);
+    }
+
+    fn apply_structure(&mut self, res: StructureResult) {
+        let tz = self.tz_setting.clone();
+        let parser = self.st.apply(res, &tz);
+        self.structure_changed(parser);
+    }
+
+    /// Pushes a changed parser into everything that depends on it and
+    /// invalidates what was painted with the old one.
+    pub fn structure_changed(&mut self, parser: Option<Arc<oxtail_columns::Parser>>) {
+        self.hl.borrow_mut().set_parser(parser);
+        self.galleys.borrow_mut().clear();
+        self.tcache.clear();
+        self.max_text_w = 0.0;
+        self.filter.set_columns(self.st.query_context());
+    }
+
+    /// Accepts the pending structure suggestion (parser plus table view).
+    pub fn accept_suggestion(&mut self) {
+        let parser = self.st.accept_suggestion();
+        self.structure_changed(parser);
+    }
+
+    /// Dismisses the pending structure suggestion.
+    pub fn dismiss_suggestion(&mut self) {
+        self.st.dismiss_suggestion();
+    }
+
+    /// Uses a parser chosen by the user. Returns an error message when it
+    /// does not compile.
+    pub fn choose_parser(&mut self, spec: oxtail_columns::ParserSpec) -> Result<(), String> {
+        let parser = self.st.choose(spec)?;
+        self.structure_changed(Some(parser));
+        Ok(())
+    }
+
+    /// Back to plain text.
+    pub fn clear_parser(&mut self) {
+        self.st.clear();
+        self.structure_changed(None);
+    }
+
+    /// Shows or hides the table view.
+    pub fn set_table(&mut self, on: bool) {
+        self.st.set_table(on);
+        self.tcache.clear();
+        self.max_text_w = 0.0;
+        self.h_scroll = 0.0;
+    }
+
+    /// Whether the table view is showing.
+    pub fn table_active(&self) -> bool {
+        self.st.table && self.st.parser.is_some()
+    }
+
+    /// Changes the time zone of the tab (timestamps are re-rendered).
+    pub fn set_time_zone(&mut self, tz: &TimezoneSetting) {
+        if &self.tz_setting != tz {
+            self.tz_setting = tz.clone();
+            self.st.set_zone(tz);
+            self.tcache.clear();
+            self.galleys.borrow_mut().clear();
+            self.filter.set_columns(self.st.query_context());
+        }
+    }
+
+    /// The widest visible cell of the column at display position `pos`, in
+    /// characters (for auto-fit).
+    pub fn widest_cell(&self, pos: usize) -> usize {
+        let Some(col) = self.st.layout.cols.get(pos).map(|c| c.col) else {
+            return 0;
+        };
+        let mut hl = self.hl.borrow_mut();
+        self.last_rows
+            .iter()
+            .filter_map(|l| {
+                let p = hl.prepare(l);
+                p.record
+                    .as_ref()
+                    .map(|r| self.st.cell_text(col, r).chars().count())
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The parsed record of the selected line (the cursor line), for the
+    /// detail pane, with its line text.
+    pub fn selected_record(&self) -> Option<(Arc<Line>, Arc<crate::highlight::Prepared>)> {
+        let off = self.selection.map(|s| s.cursor.offset).or(self.cursor)?;
+        let line = self.cache.get(off)?.clone();
+        let prepared = self.hl.borrow_mut().prepare(&line);
+        Some((line, prepared))
     }
 
     // ----------------------------------------------------------------- state
@@ -404,6 +527,10 @@ impl DocView {
         let mut out = PumpOutput::default();
         self.snapshot = self.doc.snapshot();
         self.sync_generation();
+        if let Some(res) = self.st.poll() {
+            self.apply_structure(res);
+            out.repaint = true;
+        }
 
         while let Ok(ev) = self.doc.events().try_recv() {
             out.repaint = true;
@@ -453,6 +580,7 @@ impl DocView {
         self.thumb_drag = None;
         self.hl.borrow_mut().clear_cache();
         self.galleys.borrow_mut().clear();
+        self.tcache.clear();
         self.max_text_w = 0.0;
         self.alert_next = None;
         self.was_exact = false;

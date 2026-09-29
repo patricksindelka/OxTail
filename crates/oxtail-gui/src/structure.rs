@@ -538,6 +538,16 @@ impl Structure {
         oxtail_columns::format::format_cell(kind, v).into_owned()
     }
 
+    /// What column queries need, when there is a parser.
+    pub fn query_context(&self) -> Option<Arc<crate::qfilter::QueryContext>> {
+        self.parser.as_ref().map(|p| {
+            Arc::new(crate::qfilter::QueryContext {
+                parser: Arc::clone(p),
+                time: Arc::clone(&self.time),
+            })
+        })
+    }
+
     /// The timestamp of a parsed record: the timestamp column when there is
     /// one, else the first timestamp in the line.
     pub fn record_time(&self, rec: Option<&Record<'_>>, line: &str) -> Option<Timestamp> {
