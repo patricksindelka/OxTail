@@ -13,6 +13,10 @@
 //! `\n` (line 0 starts at offset 0). A final line without a trailing `\n` is
 //! a line too (it may still be growing while following).
 
+pub mod cache;
+pub mod error;
+pub mod index;
 pub mod source;
 
+pub use error::CoreError;
 pub use source::{MemSource, ReadAt};
