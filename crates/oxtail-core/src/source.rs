@@ -1,7 +1,11 @@
 //! Random-access byte sources.
 
+use std::fs::File;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 /// A random-access, shareable view of bytes (a file, a spool, or memory).
 ///
@@ -94,6 +98,180 @@ impl ReadAt for MemSource {
     }
 }
 
+/// Opens `path` read-only, never blocking writers, rotators or deleters.
+///
+/// On Windows the file is opened with `FILE_SHARE_READ | FILE_SHARE_WRITE |
+/// FILE_SHARE_DELETE` so the process that writes the log can keep writing,
+/// truncating, renaming and deleting it.
+pub fn open_shared(path: &Path) -> io::Result<File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_SHARE_READ (1) | FILE_SHARE_WRITE (2) | FILE_SHARE_DELETE (4)
+        opts.share_mode(1 | 2 | 4);
+    }
+    opts.open(path)
+}
+
+fn file_read_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        loop {
+            match file.read_at(buf, offset) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                r => return r,
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        file.seek_read(buf, offset)
+    }
+}
+
+/// A read-only, positioned-read view of a file on disk (no mmap).
+///
+/// The underlying handle can be swapped with [`FileSource::reopen`] when the
+/// path is rotated, while the `Arc<FileSource>` handed to readers stays valid.
+#[derive(Debug)]
+pub struct FileSource {
+    path: Option<PathBuf>,
+    inner: RwLock<Opened>,
+}
+
+#[derive(Debug)]
+struct Opened {
+    file: Arc<File>,
+    id: Option<same_file::Handle>,
+}
+
+impl Opened {
+    fn new(file: File) -> Self {
+        let id = file.try_clone().and_then(same_file::Handle::from_file).ok();
+        Opened {
+            file: Arc::new(file),
+            id,
+        }
+    }
+}
+
+/// Relationship between a followed path and the file currently open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathState {
+    /// The path names the very same file we have open.
+    Same,
+    /// The path now names a different file (rotation).
+    Different,
+    /// The path does not exist (or cannot be opened) right now.
+    Missing,
+}
+
+impl FileSource {
+    /// Opens `path` read-only with shared access.
+    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
+        let file = open_shared(path)?;
+        Ok(Self {
+            path: Some(path.to_path_buf()),
+            inner: RwLock::new(Opened::new(file)),
+        })
+    }
+
+    /// Wraps an already opened file (e.g. a spool file). Rotation checks are
+    /// not available for such a source.
+    pub fn from_file(file: File) -> Self {
+        Self {
+            path: None,
+            inner: RwLock::new(Opened::new(file)),
+        }
+    }
+
+    /// The path this source was opened from, if any.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Re-opens the path, replacing the handle (used after rotation).
+    /// On failure the old handle stays in place.
+    pub fn reopen(&self) -> io::Result<()> {
+        let Some(path) = &self.path else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "source has no path",
+            ));
+        };
+        let file = open_shared(path)?;
+        *self.inner.write() = Opened::new(file);
+        Ok(())
+    }
+
+    /// Compares the identity of the open file (device+inode on Unix, volume
+    /// serial + file index on Windows) with what the path names right now.
+    pub fn path_state(&self) -> PathState {
+        let Some(path) = &self.path else {
+            return PathState::Same;
+        };
+        let Ok(now) = same_file::Handle::from_path(path) else {
+            return PathState::Missing;
+        };
+        match &self.inner.read().id {
+            Some(id) if *id == now => PathState::Same,
+            Some(_) => PathState::Different,
+            // Identity unavailable: assume unchanged rather than thrash.
+            None => PathState::Same,
+        }
+    }
+}
+
+impl ReadAt for FileSource {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let file = self.inner.read().file.clone();
+        file_read_at(&file, offset, buf)
+    }
+
+    fn len(&self) -> io::Result<u64> {
+        let file = self.inner.read().file.clone();
+        Ok(file.metadata()?.len())
+    }
+}
+
+/// A [`ReadAt`] whose target can be swapped while readers hold an `Arc` to it.
+/// The document's UTF-8 view is one of these so `Document::source()` stays
+/// valid across encoding changes.
+pub struct SwitchSource {
+    inner: RwLock<Arc<dyn ReadAt>>,
+}
+
+impl SwitchSource {
+    /// Creates a switchable source delegating to `inner`.
+    pub fn new(inner: Arc<dyn ReadAt>) -> Self {
+        Self {
+            inner: RwLock::new(inner),
+        }
+    }
+
+    /// Replaces the delegate.
+    pub fn switch(&self, inner: Arc<dyn ReadAt>) {
+        *self.inner.write() = inner;
+    }
+}
+
+impl ReadAt for SwitchSource {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let inner = self.inner.read().clone();
+        inner.read_at(offset, buf)
+    }
+
+    fn len(&self) -> io::Result<u64> {
+        let inner = self.inner.read().clone();
+        inner.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +288,53 @@ mod tests {
         assert_eq!(src.read_at(3, &mut buf).unwrap(), 0);
         let mut exact = [0u8; 2];
         assert!(src.read_exact_at(0, &mut exact).is_err());
+    }
+
+    #[test]
+    fn file_source_reads_grows_and_detects_rotation() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.log");
+        std::fs::write(&path, b"hello\n").unwrap();
+        let src = FileSource::open(&path).unwrap();
+        assert_eq!(src.len().unwrap(), 6);
+        let mut buf = [0u8; 16];
+        let n = src.read_at(1, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"ello\n");
+        assert_eq!(src.read_at(6, &mut buf).unwrap(), 0);
+        assert_eq!(src.path_state(), PathState::Same);
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(b"more\n").unwrap();
+        assert_eq!(src.len().unwrap(), 11);
+        std::fs::write(&path, b"x").unwrap(); // truncate in place: same file
+        assert_eq!(src.len().unwrap(), 1);
+        assert_eq!(src.path_state(), PathState::Same);
+
+        // Rotate: the open handle keeps the old file, the path names a new one.
+        std::fs::rename(&path, dir.path().join("f.log.1")).unwrap();
+        assert_eq!(src.path_state(), PathState::Missing);
+        std::fs::write(&path, b"new file\n").unwrap();
+        assert_eq!(src.path_state(), PathState::Different);
+        assert_eq!(src.len().unwrap(), 1);
+        src.reopen().unwrap();
+        assert_eq!(src.path_state(), PathState::Same);
+        assert_eq!(src.len().unwrap(), 9);
+    }
+
+    #[test]
+    fn open_missing_file_errors() {
+        assert!(FileSource::open("/definitely/not/here.log").is_err());
+    }
+
+    #[test]
+    fn switch_source_swaps_target() {
+        let sw = SwitchSource::new(Arc::new(MemSource::new(b"abc".to_vec())));
+        assert_eq!(sw.len().unwrap(), 3);
+        sw.switch(Arc::new(MemSource::new(b"z".to_vec())));
+        assert_eq!(sw.len().unwrap(), 1);
     }
 }
