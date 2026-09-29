@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "oxtail-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "oxtail-columns"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "criterion",
  "csv-core",
@@ -2863,7 +2863,7 @@ dependencies = [
 
 [[package]]
 name = "oxtail-config"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "crossbeam-channel",
  "directories",
@@ -2880,7 +2880,7 @@ dependencies = [
 
 [[package]]
 name = "oxtail-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "chardetng",
  "criterion",
@@ -2900,7 +2900,7 @@ dependencies = [
 
 [[package]]
 name = "oxtail-gui"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "crossbeam-channel",
  "eframe",
@@ -2925,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "oxtail-highlight"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aho-corasick",
  "insta",
@@ -2939,7 +2939,7 @@ dependencies = [
 
 [[package]]
 name = "oxtail-search"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aho-corasick",
  "criterion",
@@ -2956,7 +2956,7 @@ dependencies = [
 
 [[package]]
 name = "oxtail-time"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "jiff",
  "proptest",

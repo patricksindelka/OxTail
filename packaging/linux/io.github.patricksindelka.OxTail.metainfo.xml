@@ -33,6 +33,6 @@
   </supports>
   <!-- TODO before Flathub submission: add <screenshots> (needs real captures). -->
   <releases>
-    <release version="0.1.0" date="2026-09-29"/>
+    <release version="0.0.1" date="2026-09-29"/>
   </releases>
 </component>

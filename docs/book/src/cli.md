@@ -28,7 +28,7 @@ some_cmd | oxtail -                     # view standard input
 | `--data-dir PATH` | Use `PATH` as the data folder (settings, profiles, themes, session). See [Installation and portable mode](install.md). |
 | `--renderer R` | `auto` (default), `wgpu` or `glow` (`opengl` and `gl` are accepted for `glow`). Overrides the `renderer` setting. See [Troubleshooting](troubleshooting.md#the-window-does-not-open-or-is-blank). |
 | `--new-instance` | Do not hand the files to a running instance; start a new window even if one is running for the same data folder. |
-| `-V`, `--version` | Print the version (`oxtail 0.1.0`) and exit. |
+| `-V`, `--version` | Print the version (`oxtail 0.0.1`) and exit. |
 | `-h`, `--help` | Print the usage text and exit. |
 
 Values can be given as `--lines 500`, `--lines=500` or, for short options, `-n500`.
