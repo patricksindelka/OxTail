@@ -58,7 +58,7 @@ use crate::index::{
 };
 use crate::line::{DEFAULT_MAX_DISPLAY_LEN, Line, read_lines_capped};
 use crate::source::{FileSource, PathState, ReadAt, SwitchSource};
-use crate::spool::{Spool, create_temp};
+use crate::spool::{STDIN_SPOOL_PREFIX, Spool, create_temp};
 
 /// Bytes of the view indexed per actor step (keeps commands responsive).
 const INDEX_STEP: u64 = 8 * 1024 * 1024;
@@ -611,7 +611,7 @@ impl Document {
         name: impl Into<String>,
         spool_dir: Option<&Path>,
     ) -> Result<Document, CoreError> {
-        let tmp = create_temp(spool_dir, "oxtail-stdin-")?;
+        let tmp = create_temp(spool_dir, STDIN_SPOOL_PREFIX)?;
         let tmp_path = tmp.path().to_path_buf();
         let mut writer = tmp
             .as_file()

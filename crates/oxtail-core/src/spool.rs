@@ -15,6 +15,17 @@ use crate::encoding::{LineEnding, TextEncoding, Transcoder};
 use crate::error::CoreError;
 use crate::source::{FileSource, ReadAt};
 
+/// File-name prefix of every temp file this crate creates in the spool
+/// directory (transcoding spools and stdin buffers). A startup cleanup of
+/// crashed sessions only deletes files with this prefix.
+///
+/// **Must match `oxtail_config::datadir::SPOOL_PREFIX`** (this crate must not
+/// depend on `oxtail-config`, so the value is duplicated).
+pub const SPOOL_PREFIX: &str = "oxtail-spool-";
+
+/// Prefix of the stdin buffer files (starts with [`SPOOL_PREFIX`]).
+pub(crate) const STDIN_SPOOL_PREFIX: &str = "oxtail-spool-stdin-";
+
 /// Creates a named temp file in `dir`, falling back to the system temp dir.
 pub(crate) fn create_temp(dir: Option<&Path>, prefix: &str) -> Result<NamedTempFile, CoreError> {
     let mut b = tempfile::Builder::new();
@@ -45,7 +56,7 @@ impl Spool {
         encoding: TextEncoding,
         line_ending: LineEnding,
     ) -> Result<Self, CoreError> {
-        let tmp = create_temp(dir, "oxtail-")?;
+        let tmp = create_temp(dir, SPOOL_PREFIX)?;
         let reader_file: File = tmp
             .reopen()
             .map_err(|e| CoreError::io(tmp.path().to_path_buf(), e))?;
@@ -106,6 +117,18 @@ mod tests {
         assert_eq!(&buf[..n], b"hi\n");
         drop(s);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn spool_files_carry_the_shared_prefix() {
+        assert!(STDIN_SPOOL_PREFIX.starts_with(SPOOL_PREFIX));
+        let dir = tempfile::tempdir().unwrap();
+        let s = Spool::new(Some(dir.path()), TextEncoding::UTF_16LE, LineEnding::Lf).unwrap();
+        let name = s.path().file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with(SPOOL_PREFIX), "{name}");
+        let t = create_temp(Some(dir.path()), STDIN_SPOOL_PREFIX).unwrap();
+        let name = t.path().file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with(SPOOL_PREFIX), "{name}");
     }
 
     #[test]

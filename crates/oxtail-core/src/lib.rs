@@ -44,3 +44,4 @@ pub use index::LineIndex;
 pub use line::Line;
 pub use source::FileSource;
 pub use source::{MemSource, ReadAt};
+pub use spool::SPOOL_PREFIX;

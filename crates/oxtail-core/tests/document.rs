@@ -371,6 +371,18 @@ fn stdin_like_reader_is_spooled_and_followed() {
     wait_until("writer finished", || !doc.snapshot().writing);
     let t = request(&doc, LineRequest::Tail { count: 1 });
     assert_eq!(texts(&t), ["line 99"]);
+    // Every file left in the spool dir carries the shared prefix.
+    let names: Vec<String> = std::fs::read_dir(spool.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(!names.is_empty());
+    assert!(
+        names
+            .iter()
+            .all(|n| n.starts_with(oxtail_core::SPOOL_PREFIX)),
+        "{names:?}"
+    );
     drop(doc);
     assert_eq!(spool_files(spool.path()), 0);
 }
