@@ -26,7 +26,9 @@
 //! view --(chunked memchr scan)--> sparse LineIndex (Arc<RwLock>, brief locks)
 //! ```
 //!
-//! Plain UTF-8/ASCII files use the file itself as the view. Everything a
+//! Plain UTF-8/ASCII files use the file itself as the view. Spooled files are
+//! transcoded from offset 0 in steps; `Tail` requests wait for that to finish
+//! (see `Parked` in the source) because the end of the view is unknown before. Everything a
 //! caller sees (offsets, [`Document::source`]) refers to the view.
 //!
 //! # Generations
@@ -140,7 +142,10 @@ pub enum LineRequest {
         count: usize,
     },
     /// The last `count` lines (found by scanning backward from the end, so it
-    /// works before indexing finishes).
+    /// works before indexing finishes). For a *spooled* (non-UTF-8) file the
+    /// end of the view is only known once the spool has transcoded the whole
+    /// raw file, so the answer is deferred until it has caught up with the
+    /// raw length at request time (it is never a tail of a half-built view).
     Tail {
         /// Maximum number of lines.
         count: usize,
@@ -875,6 +880,23 @@ impl Drop for Document {
     }
 }
 
+/// A `Tail` request that arrived while the spool was still transcoding.
+///
+/// The spool is filled from offset 0 in steps, and view offsets cannot be
+/// mapped from the raw end of the file without transcoding everything before
+/// it. The tail of the *view so far* would be lines from the middle of the
+/// file, so such a request is parked until the spool has consumed all raw
+/// bytes that existed when it arrived (`target`); then it is answered from the
+/// real end. Requests of other kinds work on the view as it is and are not
+/// parked.
+struct Parked {
+    id: RequestId,
+    generation: u64,
+    req: LineRequest,
+    /// Raw length at the time of the request.
+    target: u64,
+}
+
 /// The actor: owns the pipeline and runs on its own thread.
 struct Actor {
     shared: Arc<Shared>,
@@ -907,6 +929,8 @@ struct Actor {
     stalled: bool,
     initialised: bool,
     initial_tail: Option<usize>,
+    /// Tail requests waiting for the spool to catch up.
+    parked: Vec<Parked>,
     source_open: Option<Arc<AtomicBool>>,
     last_publish: Instant,
     last_progress: Instant,
@@ -925,6 +949,7 @@ impl Actor {
             file: setup.file,
             choice: setup.opts.encoding,
             initial_tail: setup.opts.start_at_tail,
+            parked: Vec::new(),
             opts: setup.opts,
             detected: None,
             spool: None,
@@ -977,6 +1002,7 @@ impl Actor {
                     Err(TryRecvError::Disconnected) => return,
                 }
             }
+            self.flush_parked();
             if self.has_work() {
                 self.step();
                 if !first_step_done {
@@ -1049,29 +1075,7 @@ impl Actor {
                     self.poll_deadline = Some(self.last_poll + MIN_POLL_GAP);
                 }
             }
-            Cmd::Lines(id, requested_gen, req) => {
-                if requested_gen != self.shared.generation.load(Ordering::Acquire) {
-                    self.shared.emit(DocEvent::Lines {
-                        id,
-                        generation: requested_gen,
-                        lines: Vec::new(),
-                    });
-                    return true;
-                }
-                let lines = match self.shared.read_request(&req) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.shared
-                            .emit(DocEvent::Error(format!("read failed: {e}")));
-                        Vec::new()
-                    }
-                };
-                self.shared.emit(DocEvent::Lines {
-                    id,
-                    generation: requested_gen,
-                    lines,
-                });
-            }
+            Cmd::Lines(id, requested_gen, req) => self.serve(id, requested_gen, req),
             Cmd::SetEncoding(choice) => {
                 self.choice = choice;
                 self.reset_pipeline();
@@ -1092,15 +1096,80 @@ impl Actor {
 
     fn send_initial_tail(&mut self) {
         if let Some(n) = self.initial_tail.take() {
-            let lines = self
-                .shared
-                .read_request(&LineRequest::Tail { count: n })
-                .unwrap_or_default();
-            self.shared.emit(DocEvent::Lines {
-                id: RequestId::INITIAL,
-                generation: self.shared.generation.load(Ordering::Acquire),
-                lines,
+            let generation = self.shared.generation.load(Ordering::Acquire);
+            self.serve(
+                RequestId::INITIAL,
+                generation,
+                LineRequest::Tail { count: n },
+            );
+        }
+    }
+
+    /// Answers a line request (or parks it, see [`Parked`]).
+    fn serve(&mut self, id: RequestId, requested_gen: u64, req: LineRequest) {
+        if requested_gen != self.shared.generation.load(Ordering::Acquire) {
+            // Stale: an empty answer under the requested generation, which
+            // the receiver discards.
+            self.answer_empty(id, requested_gen);
+            return;
+        }
+        if matches!(req, LineRequest::Tail { .. }) && self.spool_behind() {
+            self.parked.push(Parked {
+                id,
+                generation: requested_gen,
+                req,
+                target: self.raw_target,
             });
+            return;
+        }
+        self.answer(id, requested_gen, &req);
+    }
+
+    fn answer_empty(&self, id: RequestId, generation: u64) {
+        self.shared.emit(DocEvent::Lines {
+            id,
+            generation,
+            lines: Vec::new(),
+        });
+    }
+
+    fn answer(&self, id: RequestId, generation: u64, req: &LineRequest) {
+        let lines = match self.shared.read_request(req) {
+            Ok(l) => l,
+            Err(e) => {
+                self.shared
+                    .emit(DocEvent::Error(format!("read failed: {e}")));
+                Vec::new()
+            }
+        };
+        self.shared.emit(DocEvent::Lines {
+            id,
+            generation,
+            lines,
+        });
+    }
+
+    /// `true` while the spool has not transcoded everything the raw file is
+    /// known to hold, i.e. the end of the view is not the end of the file.
+    fn spool_behind(&self) -> bool {
+        self.spool.is_some() && self.raw_pos < self.raw_target && self.error.is_none()
+    }
+
+    /// Answers parked tail requests whose spool has caught up (or that can no
+    /// longer be answered).
+    fn flush_parked(&mut self) {
+        if self.parked.is_empty() {
+            return;
+        }
+        let generation = self.shared.generation.load(Ordering::Acquire);
+        for p in std::mem::take(&mut self.parked) {
+            if p.generation != generation || self.error.is_some() {
+                self.answer_empty(p.id, p.generation);
+            } else if self.spool.is_none() || self.raw_pos >= p.target {
+                self.answer(p.id, p.generation, &p.req);
+            } else {
+                self.parked.push(p);
+            }
         }
     }
 
