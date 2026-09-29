@@ -1431,11 +1431,13 @@ impl Actor {
             self.shared.view.switch(self.raw.clone());
         } else {
             match Spool::new(self.opts.spool_dir.as_deref(), d.encoding, d.line_ending) {
-                Ok(mut s) => {
+                Ok(s) => {
                     #[cfg(test)]
-                    {
+                    let s = {
+                        let mut s = s;
                         s.fault = self.spool_fault.clone();
-                    }
+                        s
+                    };
                     self.shared.view.switch(s.source());
                     self.spool = Some(s);
                 }

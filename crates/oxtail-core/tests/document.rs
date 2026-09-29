@@ -675,7 +675,7 @@ fn requests_on_a_huge_single_line_read_bounded_bytes() {
     assert_eq!(f.len(), 1);
     // Forward measurement of the one long line is inherent; the backward
     // search and the number lookup are what must stay bounded.
-    assert!(f[0].offset >= n as u64 / 2 - 4 * mib as u64 - 64 * 1024);
+    assert!(f[0].offset >= n as u64 / 2 - 4 * mib - 64 * 1024);
     let pos = doc.line_of_offset(n as u64 / 2).unwrap();
     assert_eq!(pos.line, 0);
     assert!(pos.exact);
