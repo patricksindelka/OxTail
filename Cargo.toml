@@ -83,5 +83,85 @@ strip = true
 panic = "abort"
 opt-level = 3
 
+
+# Size budget (PLAN.md §3.1: binary < 20 MB). GPU setup, windowing, D-Bus,
+# accessibility and image decoding are not on the hot path, so optimise them
+# for size; OxTail's own crates and regex/memchr/aho-corasick/encoding_rs keep
+# opt-level 3. Unknown package names are ignored on platforms that don't use them.
+[profile.release.package.naga]
+opt-level = "s"
+
+[profile.release.package.wgpu]
+opt-level = "s"
+
+[profile.release.package.wgpu-core]
+opt-level = "s"
+
+[profile.release.package.wgpu-hal]
+opt-level = "s"
+
+[profile.release.package.wgpu-types]
+opt-level = "s"
+
+[profile.release.package.zbus]
+opt-level = "s"
+
+[profile.release.package.zvariant]
+opt-level = "s"
+
+[profile.release.package.winit]
+opt-level = "s"
+
+[profile.release.package.x11rb]
+opt-level = "s"
+
+[profile.release.package.x11rb-protocol]
+opt-level = "s"
+
+[profile.release.package.smithay-client-toolkit]
+opt-level = "s"
+
+[profile.release.package.wayland-client]
+opt-level = "s"
+
+[profile.release.package.wayland-backend]
+opt-level = "s"
+
+[profile.release.package.image]
+opt-level = "s"
+
+[profile.release.package.png]
+opt-level = "s"
+
+[profile.release.package.accesskit]
+opt-level = "s"
+
+[profile.release.package.accesskit_consumer]
+opt-level = "s"
+
+[profile.release.package.accesskit_unix]
+opt-level = "s"
+
+[profile.release.package.accesskit_atspi_common]
+opt-level = "s"
+
+[profile.release.package.atspi]
+opt-level = "s"
+
+[profile.release.package.egui_glow]
+opt-level = "s"
+
+[profile.release.package.glutin]
+opt-level = "s"
+
+[profile.release.package.glow]
+opt-level = "s"
+
+[profile.release.package.notify-rust]
+opt-level = "s"
+
+[profile.release.package.arboard]
+opt-level = "s"
+
 [profile.dev.package."*"]
 opt-level = 2
