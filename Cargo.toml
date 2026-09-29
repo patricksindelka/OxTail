@@ -64,6 +64,7 @@ criterion = "0.8.2"
 insta = "1.48.0"
 egui_kittest = "0.35.0"
 fastrand = "2.5.0"
+object = { version = "0.40.0", default-features = false, features = ["read"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
