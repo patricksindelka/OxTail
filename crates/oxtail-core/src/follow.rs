@@ -194,18 +194,27 @@ impl FsWatcher {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
             _ => Path::new(".").to_path_buf(),
         };
-        // FSEvents does not deliver events for files reached through a
-        // symlinked directory (macOS temp dirs live under `/var` ->
+        // FSEvents reports real paths (macOS temp dirs live under `/var` ->
         // `/private/var`), so watch the real directory there.
         #[cfg(target_os = "macos")]
         let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        // notify's FSEvents backend does not deliver modifications of an
+        // already-open file for non-recursive watches (seen in CI on
+        // macos-latest), so watch recursively there; FSEvents recursion is
+        // native and cheap. Elsewhere stay non-recursive: inotify would add a
+        // watch per subdirectory (think `/var/log`).
+        #[cfg(target_os = "macos")]
+        let mode = RecursiveMode::Recursive;
+        #[cfg(not(target_os = "macos"))]
+        let mode = RecursiveMode::NonRecursive;
+        let event_dir = dir.clone();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             match res {
                 Ok(ev) => {
                     if ev
                         .paths
                         .iter()
-                        .any(|p| p.file_name() == Some(name.as_os_str()))
+                        .any(|p| is_watched_file(p, &event_dir, &name))
                     {
                         wake();
                     }
@@ -217,16 +226,48 @@ impl FsWatcher {
         .map_err(|e| tracing::debug!("notify unavailable: {e}"))
         .ok()?;
         watcher
-            .watch(&dir, RecursiveMode::NonRecursive)
+            .watch(&dir, mode)
             .map_err(|e| tracing::debug!("cannot watch {}: {e}", dir.display()))
             .ok()?;
         Some(Self { _watcher: watcher })
     }
 }
 
+/// Whether an event path names the followed file: same file name and, when
+/// the event path has a parent, the watched directory (recursive watches on
+/// macOS also report files in subdirectories). Parent comparison is lenient
+/// when the event path is relative or not canonical.
+fn is_watched_file(event: &Path, dir: &Path, name: &std::ffi::OsStr) -> bool {
+    if event.file_name() != Some(name) {
+        return false;
+    }
+    match event.parent() {
+        Some(parent) if parent.is_absolute() && dir.is_absolute() => {
+            parent == dir || std::fs::canonicalize(parent).is_ok_and(|p| p == dir)
+        }
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_filter_matches_only_the_followed_file() {
+        let dir = std::env::temp_dir().join("oxtail-filter-test");
+        let name = std::ffi::OsStr::new("app.log");
+        assert!(is_watched_file(&dir.join("app.log"), &dir, name));
+        assert!(!is_watched_file(&dir.join("other.log"), &dir, name));
+        // Recursive watches (macOS) also report same-named files deeper down.
+        assert!(!is_watched_file(
+            &dir.join("sub").join("app.log"),
+            &dir,
+            name
+        ));
+        // Relative event paths are accepted on the name alone.
+        assert!(is_watched_file(Path::new("app.log"), &dir, name));
+    }
 
     #[test]
     fn classify_covers_all_cases() {
