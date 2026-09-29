@@ -170,12 +170,62 @@ pub fn log4j_pattern_to_regex(pattern: &str) -> Result<String, ColumnsError> {
     }
 
     let last_is_group = matches!(pieces.last(), Some(Piece::Group { .. }));
+    let n = pieces.len();
+    // Padding next to literal spaces is folded into the literal (` {k,}`) so
+    // the regex stays unambiguous, which lets the regex engine use its fast
+    // one-pass matcher for captures.
+    let mut flex_lead = vec![false; n];
+    let mut flex_trail = vec![false; n];
+    for i in 0..n {
+        if let Piece::Group {
+            pad_left, pad_right, ..
+        } = &mut pieces[i]
+        {
+            let (l, r) = (*pad_left, *pad_right);
+            if r && matches!(pieces.get(i + 1), Some(Piece::Lit(s)) if s.starts_with(' ')) {
+                flex_lead[i + 1] = true;
+                if let Piece::Group { pad_right, .. } = &mut pieces[i] {
+                    *pad_right = false;
+                }
+            }
+            if l && i > 0 && matches!(&pieces[i - 1], Piece::Lit(s) if s.ends_with(' ')) {
+                flex_trail[i - 1] = true;
+                if let Piece::Group { pad_left, .. } = &mut pieces[i] {
+                    *pad_left = false;
+                }
+            }
+        }
+    }
+    let next_lit_first: Vec<Option<char>> = (0..n)
+        .map(|i| match pieces.get(i + 1) {
+            Some(Piece::Lit(s)) => s.chars().next(),
+            _ => None,
+        })
+        .collect();
     let mut out = String::from("^");
     let mut used: Vec<String> = Vec::new();
-    let n = pieces.len();
     for (idx, p) in pieces.into_iter().enumerate() {
         match p {
-            Piece::Lit(s) => out.push_str(&regex::escape(&s)),
+            Piece::Lit(s) => {
+                let mut body: &str = &s;
+                let mut lead = 0;
+                let mut trail = 0;
+                if flex_lead[idx] {
+                    lead = body.len() - body.trim_start_matches(' ').len();
+                    body = &body[lead..];
+                }
+                if flex_trail[idx] {
+                    trail = body.len() - body.trim_end_matches(' ').len();
+                    body = &body[..body.len() - trail];
+                }
+                if lead > 0 {
+                    out.push_str(&format!(" {{{lead},}}"));
+                }
+                out.push_str(&regex::escape(body));
+                if trail > 0 {
+                    out.push_str(&format!(" {{{trail},}}"));
+                }
+            }
             Piece::Group {
                 mut name,
                 re,
@@ -189,6 +239,14 @@ pub fn log4j_pattern_to_regex(pattern: &str) -> Result<String, ColumnsError> {
                     k += 1;
                 }
                 used.push(name.clone());
+                let re = if re == ".*?" && base != "msg" {
+                    match next_lit_first[idx] {
+                        Some(c) if c != ' ' => format!("[^{}]*", regex::escape(&c.to_string())),
+                        _ => re,
+                    }
+                } else {
+                    re
+                };
                 let re = if idx == n - 1 && last_is_group && re == ".*?" {
                     ".*".to_string()
                 } else {

@@ -455,4 +455,29 @@ mod tests {
         assert!(detect(&[]).is_empty());
         assert!(detect(&["Hello, world"]).is_empty());
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn detect_never_panics(lines in proptest::collection::vec(any::<String>(), 0..12)) {
+                let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+                for d in detect(&refs) {
+                    prop_assert!((0.0..=1.0).contains(&d.score));
+                    // Every detection must compile.
+                    prop_assert!(d.spec.compile().is_ok());
+                }
+            }
+
+            #[test]
+            fn detect_structured_lines_never_panics(
+                lines in proptest::collection::vec("[ -~{}\\[\\]\",=:|;\\t]{0,60}", 0..12)
+            ) {
+                let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+                let _ = detect(&refs);
+            }
+        }
+    }
 }

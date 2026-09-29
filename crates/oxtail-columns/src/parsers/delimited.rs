@@ -1,5 +1,6 @@
 //! Delimited values (CSV/TSV/...) and W3C extended logs.
 
+use std::cell::RefCell;
 use std::ops::Range;
 
 use csv_core::{ReadFieldResult, ReaderBuilder, Terminator};
@@ -20,11 +21,43 @@ pub(crate) struct Delimited {
     has_header: bool,
 }
 
+thread_local! {
+    /// Built readers per `(delimiter, quote)`. Building a `csv_core::Reader`
+    /// constructs a DFA (~10 microseconds), far too slow to do per line, and
+    /// `Reader::clone` does not preserve the DFA's output table, so readers
+    /// are cached per thread and `reset()` before each use.
+    static READERS: RefCell<Vec<((u8, u8), csv_core::Reader)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn with_reader<R>(delim: u8, quote: u8, f: impl FnOnce(&mut csv_core::Reader) -> R) -> R {
+    READERS.with(|cell| {
+        let mut v = cell.borrow_mut();
+        let i = match v.iter().position(|(k, _)| *k == (delim, quote)) {
+            Some(i) => i,
+            None => {
+                let r = ReaderBuilder::new()
+                    .delimiter(delim)
+                    .quote(quote)
+                    .double_quote(true)
+                    .terminator(Terminator::Any(b'\n'))
+                    .build();
+                v.push(((delim, quote), r));
+                v.len() - 1
+            }
+        };
+        let rdr = &mut v[i].1;
+        rdr.reset();
+        f(rdr)
+    })
+}
+
 impl Delimited {
     pub(crate) fn new(delim: char, quote: char, columns: Vec<String>, has_header: bool) -> Self {
+        let delim = if delim.is_ascii() { delim as u8 } else { b',' };
+        let quote = if quote.is_ascii() { quote as u8 } else { b'"' };
         Delimited {
-            delim: if delim.is_ascii() { delim as u8 } else { b',' },
-            quote: if quote.is_ascii() { quote as u8 } else { b'"' },
+            delim,
+            quote,
             columns,
             has_header,
         }
@@ -54,12 +87,7 @@ impl Delimited {
         if bytes.is_empty() {
             return (cells, 0);
         }
-        let mut rdr = ReaderBuilder::new()
-            .delimiter(self.delim)
-            .quote(self.quote)
-            .double_quote(true)
-            .terminator(Terminator::Any(b'\n'))
-            .build();
+        with_reader(self.delim, self.quote, |rdr| {
         let mut out = vec![0u8; bytes.len() + 1];
         let mut pos = 0usize;
         let mut fstart = 0usize;
@@ -99,6 +127,7 @@ impl Delimited {
                 }
             }
         }
+        });
         (cells, total)
     }
 
