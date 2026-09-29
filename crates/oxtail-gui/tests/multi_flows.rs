@@ -44,9 +44,14 @@ fn a_merged_tab_shows_interleaved_lines_with_source_badges() {
     let ids: Vec<u64> = app.merge_candidates().iter().map(|c| c.0).collect();
     let id = app.merge_tabs(&ids).expect("merged tab");
     let mut h = harness(app);
-    step_until(&mut h, "merged rows", |a| {
+    // Wait for the view to reach the tail too: the rows can be laid out while
+    // the merge is still growing (seen with the suite pinned to one core).
+    step_until(&mut h, "merged rows at the tail", |a| {
         let m = merged(a);
-        m.len() == 60 && m.last_rows.len() > 8 && m.last_rows.iter().all(|(_, l)| l.is_some())
+        m.len() == 60
+            && m.last_rows.len() > 8
+            && m.last_rows.iter().all(|(_, l)| l.is_some())
+            && m.last_rows.last().is_some_and(|(i, _)| *i == 59)
     });
     let app = h.state();
     let m = merged(app);

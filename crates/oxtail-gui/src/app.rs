@@ -731,6 +731,12 @@ impl OxTailApp {
         &self.settings
     }
 
+    /// Whether the watcher for hand-edited config files has started (it is
+    /// created in the background after launch).
+    pub fn config_watcher_running(&self) -> bool {
+        self._config_watcher.is_some()
+    }
+
     /// Names of the available profiles (user profiles first).
     pub fn profile_names(&self) -> Vec<String> {
         self.profiles.profiles().map(|p| p.name.clone()).collect()
@@ -1557,6 +1563,10 @@ impl OxTailApp {
                     profile.match_content = None;
                 }
                 self.send_persist(Job::Profile(profile));
+                // Don't wait for the config watcher: it may not be running yet
+                // (it starts in the background) or may miss the change. Jobs
+                // run in order, so this reload sees the file just written.
+                self.send_persist(Job::ReloadProfiles);
                 if let Some(v) = self.active_view_mut() {
                     v.hl.borrow_mut().set_rules(rules, Some(name.clone()));
                     v.galleys.borrow_mut().clear();

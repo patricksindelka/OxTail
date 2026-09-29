@@ -172,15 +172,17 @@ fn a_profile_saved_from_the_rule_editor_is_written_and_hot_reloaded() {
         base: None,
     });
     wait_for_file(&tmp.path().join("profiles").join("My_Team.toml"));
-    // The watcher notices the new file and the profile list follows.
-    step_until(&mut h, "hot reload", |a| {
+    // The profile list follows the save without relying on the watcher, which
+    // may not have started yet (CI run 10 on macos-latest).
+    step_until(&mut h, "saved profile listed", |a| {
         a.profile_names().iter().any(|n| n == "My Team")
     });
     // The tab uses the saved profile.
     let profile = h.state().active_view().unwrap().hl.borrow().profile.clone();
     assert_eq!(profile.as_deref(), Some("My Team"));
 
-    // A hand-edited change to the file is picked up too.
+    // A hand-edited change to the file is picked up too, by the watcher.
+    step_until(&mut h, "config watcher", |a| a.config_watcher_running());
     let path = tmp.path().join("profiles").join("My_Team.toml");
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, format!("{text}\n# edited by hand\n")).unwrap();
