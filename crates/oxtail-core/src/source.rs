@@ -289,4 +289,52 @@ mod tests {
         let mut exact = [0u8; 2];
         assert!(src.read_exact_at(0, &mut exact).is_err());
     }
+
+    #[test]
+    fn file_source_reads_grows_and_detects_rotation() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.log");
+        std::fs::write(&path, b"hello\n").unwrap();
+        let src = FileSource::open(&path).unwrap();
+        assert_eq!(src.len().unwrap(), 6);
+        let mut buf = [0u8; 16];
+        let n = src.read_at(1, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"ello\n");
+        assert_eq!(src.read_at(6, &mut buf).unwrap(), 0);
+        assert_eq!(src.path_state(), PathState::Same);
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(b"more\n").unwrap();
+        assert_eq!(src.len().unwrap(), 11);
+        std::fs::write(&path, b"x").unwrap(); // truncate in place: same file
+        assert_eq!(src.len().unwrap(), 1);
+        assert_eq!(src.path_state(), PathState::Same);
+
+        // Rotate: the open handle keeps the old file, the path names a new one.
+        std::fs::rename(&path, dir.path().join("f.log.1")).unwrap();
+        assert_eq!(src.path_state(), PathState::Missing);
+        std::fs::write(&path, b"new file\n").unwrap();
+        assert_eq!(src.path_state(), PathState::Different);
+        assert_eq!(src.len().unwrap(), 1);
+        src.reopen().unwrap();
+        assert_eq!(src.path_state(), PathState::Same);
+        assert_eq!(src.len().unwrap(), 9);
+    }
+
+    #[test]
+    fn open_missing_file_errors() {
+        assert!(FileSource::open("/definitely/not/here.log").is_err());
+    }
+
+    #[test]
+    fn switch_source_swaps_target() {
+        let sw = SwitchSource::new(Arc::new(MemSource::new(b"abc".to_vec())));
+        assert_eq!(sw.len().unwrap(), 3);
+        sw.switch(Arc::new(MemSource::new(b"z".to_vec())));
+        assert_eq!(sw.len().unwrap(), 1);
+    }
 }

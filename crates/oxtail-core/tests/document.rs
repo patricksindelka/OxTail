@@ -465,3 +465,103 @@ proptest! {
         }
     }
 }
+
+/// A source whose big reads (the indexer's) fail past `gate` until opened,
+/// while small reads (line requests) always work. This freezes indexing half
+/// way, deterministically, so the approximate-line-number paths can be tested.
+struct GateSource {
+    inner: MemSource,
+    open: std::sync::atomic::AtomicBool,
+    gate: u64,
+}
+
+impl ReadAt for GateSource {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        if !self.open.load(Ordering::SeqCst) && buf.len() > 300_000 {
+            if offset >= self.gate {
+                return Err(std::io::Error::other("gate closed"));
+            }
+            let room = ((self.gate - offset) as usize).min(buf.len());
+            return self.inner.read_at(offset, &mut buf[..room]);
+        }
+        self.inner.read_at(offset, buf)
+    }
+    fn len(&self) -> std::io::Result<u64> {
+        self.inner.len()
+    }
+}
+
+#[test]
+fn approximate_numbers_before_indexing_completes() {
+    let mut data = Vec::new();
+    for i in 0..174_762 {
+        data.extend_from_slice(format!("line {i:06}\n").as_bytes());
+    }
+    let total = data.len() as u64;
+    let gate = 1 << 20;
+    let src = Arc::new(GateSource {
+        inner: MemSource::new(data),
+        open: std::sync::atomic::AtomicBool::new(false),
+        gate,
+    });
+    let doc = Document::from_source_with(src.clone(), "gated", OpenOptions::default());
+    wait_until("partial index", || {
+        let s = doc.snapshot();
+        s.utf8_len == total && s.indexed_bytes == gate
+    });
+    let s = doc.snapshot();
+    assert!(!s.lines.exact);
+    assert!(s.lines.known > 80_000 && s.lines.known < 90_000);
+    // The estimate of the total is close (fixed-width lines).
+    assert!(
+        s.lines.estimated_total.abs_diff(174_762) < 50,
+        "{:?}",
+        s.lines
+    );
+
+    // Range beyond the indexed region: approximate numbers, plausible text.
+    let r = request(
+        &doc,
+        LineRequest::Range {
+            first: 150_000,
+            count: 3,
+        },
+    );
+    assert_eq!(r.len(), 3);
+    assert!(r.iter().all(|l| !l.number_exact));
+    let n: i64 = r[0].text.trim_start_matches("line ").parse().unwrap();
+    assert!((n - 150_000).abs() < 5, "asked 150000, got {n}");
+    assert!((r[0].number as i64 - 150_000).abs() < 5);
+
+    // The scrollbar mapping works too, and the tail needs no index at all.
+    let f = request(
+        &doc,
+        LineRequest::ByteFraction {
+            fraction: 0.75,
+            count: 2,
+        },
+    );
+    assert_eq!(f.len(), 2);
+    assert!(!f[0].number_exact);
+    let t = request(&doc, LineRequest::Tail { count: 2 });
+    assert_eq!(texts(&t), ["line 174760", "line 174761"]);
+    assert!(!t[0].number_exact);
+    // A line inside the indexed region is exact.
+    let head = request(
+        &doc,
+        LineRequest::Range {
+            first: 1000,
+            count: 1,
+        },
+    );
+    assert!(head[0].number_exact);
+    assert_eq!(head[0].text, "line 001000");
+
+    // Once reads succeed again the actor recovers and finishes the index.
+    src.open.store(true, Ordering::SeqCst);
+    wait_ready(&doc, total);
+    let t = request(&doc, LineRequest::Tail { count: 1 });
+    assert!(t[0].number_exact);
+    assert_eq!(t[0].number, 174_761);
+    assert_eq!(doc.snapshot().state, DocState::Ready);
+}

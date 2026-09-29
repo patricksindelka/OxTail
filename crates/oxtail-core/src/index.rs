@@ -73,6 +73,7 @@ impl Scanner {
                 self.newlines += count as u64;
             }
             self.pos += take as u64;
+            #[allow(clippy::manual_is_multiple_of)] // is_multiple_of needs Rust 1.90; MSRV is 1.88
             if self.pos % self.spacing == 0 {
                 out.push(Checkpoint {
                     offset: self.pos,
