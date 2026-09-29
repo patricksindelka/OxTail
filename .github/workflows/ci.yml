@@ -100,7 +100,7 @@ jobs:
         working-directory: fuzz
         continue-on-error: true
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=30 -rss_limit_mb=2048
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: fuzz-artifacts-${{ matrix.target }}
