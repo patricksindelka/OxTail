@@ -225,7 +225,7 @@ pub(crate) fn scan(
                         return Some((i..end, format_of(f, b, i, end), p));
                     }
                 }
-                if epoch.is_none() {
+                if epoch.is_none() && epoch_position_ok(b, i) {
                     for f in [
                         F::EpochSeconds,
                         F::EpochMillis,
@@ -252,7 +252,64 @@ pub(crate) fn scan(
         }
         i += 1;
     }
-    epoch.or(time)
+    // Whichever candidate starts first wins; on a tie the epoch does.
+    match (epoch, time) {
+        (Some(e), Some(t)) => Some(if t.0.start < e.0.start { t } else { e }),
+        (e, t) => e.or(t),
+    }
+}
+
+/// A bare epoch number (10-19 digits) is a weak signal: accept it only at the
+/// start of the line, after `[` or `(`, or as the value of a timestamp-like key
+/// (`ts=`, `time=`, `"timestamp":`, ...). Anywhere else it is an id or a size.
+fn epoch_position_ok(b: &[u8], i: usize) -> bool {
+    let mut end = i;
+    while end > 0 && matches!(b[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    if end == 0 {
+        return true;
+    }
+    // A quoted value: `"ts":"1700000000"`.
+    if b[end - 1] == b'"' && end == i {
+        end -= 1;
+    }
+    match b[end.saturating_sub(1)] {
+        b'[' | b'(' => true,
+        b'=' | b':' => {
+            let mut k = end - 1;
+            while k > 0 && matches!(b[k - 1], b' ' | b'\t') {
+                k -= 1;
+            }
+            if k > 0 && b[k - 1] == b'"' {
+                k -= 1;
+            }
+            let key_end = k;
+            while k > 0
+                && (b[k - 1].is_ascii_alphanumeric() || matches!(b[k - 1], b'_' | b'@' | b'.'))
+            {
+                k -= 1;
+            }
+            let key = String::from_utf8_lossy(&b[k..key_end]).to_ascii_lowercase();
+            matches!(
+                key.as_str(),
+                "ts" | "t"
+                    | "time"
+                    | "timestamp"
+                    | "@timestamp"
+                    | "epoch"
+                    | "date"
+                    | "datetime"
+                    | "when"
+                    | "at"
+                    | "created"
+                    | "created_at"
+                    | "timestamp_ms"
+                    | "time_ms"
+            )
+        }
+        _ => false,
+    }
 }
 
 /// ISO matches report the comma variant when the fraction separator was `,`.
@@ -909,7 +966,7 @@ mod tests {
         let line = "1790676062 at 2026-09-29 10:01:02 12:00:00";
         assert_eq!(detect(line).expect("d").format, F::Iso8601);
         let line = "id 1790676062 at 12:00:00";
-        assert_eq!(detect(line).expect("d").format, F::EpochSeconds);
+        assert_eq!(detect(line).expect("d").format, F::TimeOnly);
     }
 
     mod prop {
@@ -935,5 +992,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn earlier_time_only_beats_later_epoch_like_number() {
+        let d = detect("10:01:02.123 order 2345678901 shipped").expect("detect");
+        assert_eq!(d.format, TimestampFormat::TimeOnly);
+        assert_eq!(d.range.start, 0);
+    }
+
+    #[test]
+    fn bare_epoch_only_near_line_start_or_keyed() {
+        assert_eq!(
+            detect("1700000000 started").map(|d| d.format),
+            Some(TimestampFormat::EpochSeconds)
+        );
+        assert_eq!(
+            detect("[1700000000] started").map(|d| d.format),
+            Some(TimestampFormat::EpochSeconds)
+        );
+        assert_eq!(
+            detect("level=info ts=1700000000 msg=x").map(|d| d.format),
+            Some(TimestampFormat::EpochSeconds)
+        );
+        assert_eq!(
+            detect("{\"level\":\"i\",\"ts\": 1700000000}").map(|d| d.format),
+            Some(TimestampFormat::EpochSeconds)
+        );
+        assert_eq!(detect("order 1700000000 shipped"), None);
+        assert_eq!(detect("bytes=1700000000 ok"), None);
     }
 }
