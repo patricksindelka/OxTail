@@ -51,8 +51,16 @@ cargo run -p xtask -- check-deps                     # portability allowlist che
 cargo bench -p oxtail-core                           # criterion benches
 ```
 
-The GUI cannot be seen in a headless container. Test GUI logic through
-`egui_kittest` or by keeping logic in plain functions with unit tests.
+Test GUI logic through `egui_kittest` or by keeping logic in plain functions
+with unit tests. To *look* at the UI without a display, render screenshots with
+the ignored `ui_screenshots` test (software Vulkan: `apt-get install
+mesa-vulkan-drivers`):
+
+```sh
+SHOT_DIR=/tmp/shots cargo test -p oxtail-gui --test ui_screenshots -- --ignored
+```
+
+Add a scene there when you change how something looks, and check the PNGs.
 
 ## Non-negotiable rules
 
