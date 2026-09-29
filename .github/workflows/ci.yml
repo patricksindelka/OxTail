@@ -63,6 +63,19 @@ jobs:
           cache-on-failure: true
       - run: cargo build --release -p oxtail-cli
       - run: cargo run -q -p xtask -- check-deps --binary target/release/oxtail${{ runner.os == 'Windows' && '.exe' || '' }}
+      # Downloadable test builds (not releases): the binary plus the `portable`
+      # marker, so settings stay in an `oxtail-data` folder next to it.
+      - name: Stage the portable build
+        shell: bash
+        run: |
+          mkdir -p dist/oxtail
+          cp target/release/oxtail${{ runner.os == 'Windows' && '.exe' || '' }} dist/oxtail/
+          touch dist/oxtail/portable
+      - uses: actions/upload-artifact@v6
+        with:
+          name: oxtail-${{ runner.os }}-${{ runner.arch }}
+          path: dist/oxtail
+          retention-days: 30
 
   fuzz-build:
     # cargo-fuzz needs nightly (sanitizer flags). The build must pass.
