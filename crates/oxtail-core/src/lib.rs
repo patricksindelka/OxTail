@@ -14,11 +14,24 @@
 //! a line too (it may still be growing while following).
 
 pub mod cache;
+pub mod document;
 pub mod encoding;
 pub mod error;
+pub mod follow;
 pub mod index;
 pub mod line;
 pub mod source;
+mod spool;
 
+pub use cache::{BLOCK_SIZE, BlockCache, CachedSource};
+pub use document::{
+    DocEvent, DocSnapshot, DocState, Document, LineCount, LinePosition, LineRequest, Notice,
+    NoticeKind, OpenOptions, RequestId,
+};
+pub use encoding::{EncodingChoice, LineEnding, TextEncoding};
 pub use error::CoreError;
+pub use follow::FollowMode;
+pub use index::LineIndex;
+pub use line::Line;
+pub use source::FileSource;
 pub use source::{MemSource, ReadAt};
