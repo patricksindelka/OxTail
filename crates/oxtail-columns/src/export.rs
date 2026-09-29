@@ -17,7 +17,7 @@ fn csv_field<W: Write>(w: &mut W, s: &str) -> io::Result<()> {
     w.write_all(b"\"")?;
     let mut rest = s;
     while let Some(i) = rest.find('"') {
-        w.write_all(rest[..=i].as_bytes())?;
+        w.write_all(&rest.as_bytes()[..=i])?;
         w.write_all(b"\"")?;
         rest = &rest[i + 1..];
     }
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn jsonl_types() {
-        let recs = vec![
+        let recs = [
             rec(Some("7"), Some("hi \"x\""), Some(r#"{"k":[1]}"#)),
             rec(Some("abc"), None, Some("not json")),
         ];

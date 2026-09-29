@@ -314,12 +314,13 @@ impl<'s> Parser<'s> {
             if self.peek() == Some('-') {
                 let mut it = self.rest().chars();
                 it.next();
-                if let Some(n) = it.next() {
-                    if !n.is_whitespace() && n != ')' {
-                        self.pos += 1;
-                        negated = !negated;
-                        continue;
-                    }
+                if let Some(n) = it.next()
+                    && !n.is_whitespace()
+                    && n != ')'
+                {
+                    self.pos += 1;
+                    negated = !negated;
+                    continue;
                 }
             }
             break;
@@ -413,7 +414,13 @@ impl<'s> Parser<'s> {
         Ok(Node::Text(self.src[start..end].to_lowercase()))
     }
 
-    fn parse_term(&mut self, start: usize, ident_end: usize, op: RawOp, oplen: usize) -> PResult<Node> {
+    fn parse_term(
+        &mut self,
+        start: usize,
+        ident_end: usize,
+        op: RawOp,
+        oplen: usize,
+    ) -> PResult<Node> {
         let column = self.src[start..ident_end].to_string();
         self.pos = ident_end + oplen;
         match self.peek() {
@@ -444,7 +451,11 @@ impl<'s> Parser<'s> {
         let mut regex = None;
         if is_regex {
             let v = &values[0];
-            match RegexBuilder::new(&v.text).size_limit(1 << 20).nest_limit(64).build() {
+            match RegexBuilder::new(&v.text)
+                .size_limit(1 << 20)
+                .nest_limit(64)
+                .build()
+            {
                 Ok(r) => regex = Some(r),
                 Err(e) => {
                     let s = e.to_string();
@@ -477,7 +488,11 @@ impl<'s> Parser<'s> {
             regex,
             base: None,
         }));
-        Ok(if negate { Node::Not(Box::new(node)) } else { node })
+        Ok(if negate {
+            Node::Not(Box::new(node))
+        } else {
+            node
+        })
     }
 
     /// Parses the value(s) after an operator: a word, a quoted string or
@@ -512,8 +527,13 @@ impl<'s> Parser<'s> {
                         self.pos += 1;
                         break;
                     }
-                    None => return self.err(open, "missing ')' to close the alternatives opened here"),
-                    Some(_) => return self.err(self.pos, "expected '|' or ')' in the list of alternatives"),
+                    None => {
+                        return self.err(open, "missing ')' to close the alternatives opened here");
+                    }
+                    Some(_) => {
+                        return self
+                            .err(self.pos, "expected '|' or ')' in the list of alternatives");
+                    }
                 }
             }
             return Ok(items);
@@ -603,7 +623,10 @@ fn assign_bases(node: &mut Node, bases: &[(String, Arc<Value>)]) {
                 && c.values[0].relative_sign() == Some('+')
             {
                 let col = c.column.to_ascii_lowercase();
-                c.base = bases.iter().find(|(k, _)| *k == col).map(|(_, v)| v.clone());
+                c.base = bases
+                    .iter()
+                    .find(|(k, _)| *k == col)
+                    .map(|(_, v)| v.clone());
             }
         }
         Node::Not(n) => assign_bases(n, bases),
@@ -655,7 +678,9 @@ fn eq_ci(cell: &str, v: &Value) -> bool {
     if cell.is_ascii() && v.text.is_ascii() {
         cell.eq_ignore_ascii_case(&v.text)
     } else {
-        cell.chars().flat_map(char::to_lowercase).eq(v.lower.chars())
+        cell.chars()
+            .flat_map(char::to_lowercase)
+            .eq(v.lower.chars())
     }
 }
 
@@ -756,7 +781,12 @@ fn check_node(node: &Node, schema: &Schema, out: &mut Vec<QueryError>) {
     match node {
         Node::Cmp(c) => match schema.find(&c.column) {
             None => {
-                let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).take(12).collect();
+                let names: Vec<&str> = schema
+                    .columns
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .take(12)
+                    .collect();
                 let hint = if names.is_empty() {
                     "this file has no columns".to_string()
                 } else {
@@ -836,20 +866,20 @@ fn eval_cmp(c: &Cmp, ctx: &Ctx<'_>) -> bool {
 }
 
 fn eq_value(v: &Value, cell: &str, kind: ColumnKind, ctx: &Ctx<'_>) -> bool {
-    if kind == ColumnKind::Level {
-        if let (Some(a), Some(b)) = (Level::parse(cell), v.level) {
-            return a == b;
-        }
+    if kind == ColumnKind::Level
+        && let (Some(a), Some(b)) = (Level::parse(cell), v.level)
+    {
+        return a == b;
     }
     if v.glob {
         return glob_ci(&v.lower, cell);
     }
     match kind {
         ColumnKind::Number | ColumnKind::Duration | ColumnKind::Bytes => {
-            if let (Some(cq), Some(rq)) = (parse_quantity(cell), v.quantity) {
-                if let Some((a, b)) = canonical_pair(&cq, &rq) {
-                    return approx_eq(a, b);
-                }
+            if let (Some(cq), Some(rq)) = (parse_quantity(cell), v.quantity)
+                && let Some((a, b)) = canonical_pair(&cq, &rq)
+            {
+                return approx_eq(a, b);
             }
         }
         ColumnKind::Timestamp => {
@@ -909,7 +939,10 @@ fn ord_value(c: &Cmp, v: &Value, cell: &str, kind: ColumnKind, ctx: &Ctx<'_>) ->
         let (a, b) = canonical_pair(&cq, &rq)?;
         return a.partial_cmp(&b);
     }
-    if matches!(kind, ColumnKind::Number | ColumnKind::Duration | ColumnKind::Bytes) {
+    if matches!(
+        kind,
+        ColumnKind::Number | ColumnKind::Duration | ColumnKind::Bytes
+    ) {
         return None;
     }
     Some(cmp_ci(cell, v))

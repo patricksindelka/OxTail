@@ -88,45 +88,46 @@ impl Delimited {
             return (cells, 0);
         }
         with_reader(self.delim, self.quote, |rdr| {
-        let mut out = vec![0u8; bytes.len() + 1];
-        let mut pos = 0usize;
-        let mut fstart = 0usize;
-        // Output written so far for the current field (csv-core emits partial
-        // output on `InputEmpty`, so it must be accumulated).
-        let mut opos = 0usize;
-        loop {
-            let (res, nin, nout) = rdr.read_field(&bytes[pos..], &mut out[opos..]);
-            pos += nin;
-            opos += nout;
-            match res {
-                ReadFieldResult::InputEmpty => continue,
-                ReadFieldResult::OutputFull => break,
-                ReadFieldResult::End => break,
-                ReadFieldResult::Field { record_end } => {
-                    total += 1;
-                    if cells.len() < max {
-                        let raw = &bytes[fstart..pos];
-                        let raw_no_delim = match raw.last() {
-                            Some(&b) if b == self.delim => &raw[..raw.len() - 1],
-                            _ => raw,
-                        };
-                        if memchr::memchr(self.quote, raw).is_none() && &out[..opos] == raw_no_delim
-                        {
-                            cells.push(Cell::Slice(fstart..fstart + opos));
-                        } else {
-                            cells.push(Cell::Owned(
-                                String::from_utf8_lossy(&out[..opos]).into_owned(),
-                            ));
+            let mut out = vec![0u8; bytes.len() + 1];
+            let mut pos = 0usize;
+            let mut fstart = 0usize;
+            // Output written so far for the current field (csv-core emits partial
+            // output on `InputEmpty`, so it must be accumulated).
+            let mut opos = 0usize;
+            loop {
+                let (res, nin, nout) = rdr.read_field(&bytes[pos..], &mut out[opos..]);
+                pos += nin;
+                opos += nout;
+                match res {
+                    ReadFieldResult::InputEmpty => continue,
+                    ReadFieldResult::OutputFull => break,
+                    ReadFieldResult::End => break,
+                    ReadFieldResult::Field { record_end } => {
+                        total += 1;
+                        if cells.len() < max {
+                            let raw = &bytes[fstart..pos];
+                            let raw_no_delim = match raw.last() {
+                                Some(&b) if b == self.delim => &raw[..raw.len() - 1],
+                                _ => raw,
+                            };
+                            if memchr::memchr(self.quote, raw).is_none()
+                                && &out[..opos] == raw_no_delim
+                            {
+                                cells.push(Cell::Slice(fstart..fstart + opos));
+                            } else {
+                                cells.push(Cell::Owned(
+                                    String::from_utf8_lossy(&out[..opos]).into_owned(),
+                                ));
+                            }
                         }
-                    }
-                    fstart = pos;
-                    opos = 0;
-                    if record_end {
-                        break;
+                        fstart = pos;
+                        opos = 0;
+                        if record_end {
+                            break;
+                        }
                     }
                 }
             }
-        }
         });
         (cells, total)
     }

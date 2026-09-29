@@ -145,12 +145,12 @@ fn score_parser(
     let mut matched = 0usize;
     let mut shapes: HashMap<Vec<bool>, usize> = HashMap::new();
     for line in lines {
-        if let Some(rec) = parser.parse(line) {
-            if accept(line, &rec) {
-                matched += 1;
-                let shape: Vec<bool> = rec.fields.iter().map(Option::is_some).collect();
-                *shapes.entry(shape).or_insert(0) += 1;
-            }
+        if let Some(rec) = parser.parse(line)
+            && accept(line, &rec)
+        {
+            matched += 1;
+            let shape: Vec<bool> = rec.fields.iter().map(Option::is_some).collect();
+            *shapes.entry(shape).or_insert(0) += 1;
         }
     }
     if matched == 0 {

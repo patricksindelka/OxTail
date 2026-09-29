@@ -77,16 +77,10 @@ impl Cursor<'_> {
     }
 }
 
-fn to_ns(
-    y: i64,
-    mo: i64,
-    d: i64,
-    h: i64,
-    mi: i64,
-    s: i64,
-    frac_ns: i64,
-    off_s: i64,
-) -> Option<i64> {
+/// `date` is (year, month, day), `time` is (hour, minute, second).
+fn to_ns(date: (i64, i64, i64), time: (i64, i64, i64), frac_ns: i64, off_s: i64) -> Option<i64> {
+    let (y, mo, d) = date;
+    let (h, mi, s) = time;
     if !(1..=12).contains(&mo) || d < 1 || d > days_in_month(y, mo) || h > 23 || mi > 59 || s > 60 {
         return None;
     }
@@ -157,7 +151,7 @@ fn parse_fallback(value: &str) -> Option<i64> {
         while c.eat(b' ') {}
         let off = parse_offset(&mut c)?;
         return if c.done() {
-            to_ns(y, mo, d, h, mi, s, 0, off)
+            to_ns((y, mo, d), (h, mi, s), 0, off)
         } else {
             None
         };
@@ -172,7 +166,7 @@ fn parse_fallback(value: &str) -> Option<i64> {
     }
     let d = c.num(2, 2)?;
     if c.done() {
-        return to_ns(y, mo, d, 0, 0, 0, 0, 0);
+        return to_ns((y, mo, d), (0, 0, 0), 0, 0);
     }
     if !(c.eat(b'T') || c.eat(b't') || c.eat(b' ')) {
         return None;
@@ -209,7 +203,7 @@ fn parse_fallback(value: &str) -> Option<i64> {
     if !c.done() {
         return None;
     }
-    to_ns(y, mo, d, h, mi, s, frac, off)
+    to_ns((y, mo, d), (h, mi, s), frac, off)
 }
 
 #[cfg(test)]

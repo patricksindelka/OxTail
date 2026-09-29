@@ -14,6 +14,7 @@
 //! Nothing here panics on arbitrary input; malformed lines yield `None`.
 
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 mod detect;
 mod error;
@@ -23,8 +24,8 @@ mod group;
 mod level;
 mod model;
 mod parsers;
-mod query;
 mod quantity;
+mod query;
 mod stats;
 mod timestamp;
 
@@ -35,8 +36,8 @@ pub use group::RecordGrouper;
 pub use level::{Level, normalize_level};
 pub use model::{ColumnInfo, ColumnKind, Record, Schema};
 pub use parsers::{
-    FixedColumn, MAX_PARSE_LEN, Parser, ParserSpec, discover_json_columns,
-    discover_logfmt_columns, log4j_pattern_to_regex,
+    FixedColumn, MAX_PARSE_LEN, Parser, ParserSpec, discover_json_columns, discover_logfmt_columns,
+    log4j_pattern_to_regex,
 };
 pub use quantity::{Quantity, Unit, parse_bytes, parse_duration_ns, parse_quantity};
 pub use query::{Query, QueryError};

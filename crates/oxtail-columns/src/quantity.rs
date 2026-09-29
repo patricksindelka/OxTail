@@ -50,11 +50,11 @@ pub fn parse_quantity(s: &str) -> Option<Quantity> {
     let bytes = s.as_bytes();
     let mut i = 0;
     let mut sign = None;
-    if let Some(&b) = bytes.first() {
-        if b == b'+' || b == b'-' {
-            sign = Some(b as char);
-            i = 1;
-        }
+    if let Some(&b) = bytes.first()
+        && (b == b'+' || b == b'-')
+    {
+        sign = Some(b as char);
+        i = 1;
     }
     let num_start = i;
     let mut seen_digit = false;

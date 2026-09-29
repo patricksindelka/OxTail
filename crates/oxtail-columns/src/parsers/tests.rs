@@ -117,7 +117,9 @@ fn w3c_iis() {
     assert_eq!(get(&p, &r, "cs-method"), Some("GET"));
     assert_eq!(get(&p, &r, "sc-status"), Some("200"));
     assert_eq!(p.schema().columns[6].kind, ColumnKind::Duration);
-    let r = p.parse("2026-09-29 10:00:01 10.0.0.5 GET /x 200 -").unwrap();
+    let r = p
+        .parse("2026-09-29 10:00:01 10.0.0.5 GET /x 200 -")
+        .unwrap();
     assert_eq!(get(&p, &r, "time-taken"), None);
     let r = p.parse("2026-09-29 10:00:01 - GET /x 200 15").unwrap();
     assert_eq!(get(&p, &r, "s-ip"), None);

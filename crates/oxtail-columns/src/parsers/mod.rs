@@ -5,6 +5,7 @@
 //! to a [`Record`]. Parsers never panic on arbitrary input: a line that does
 //! not fit the format simply yields `None`.
 
+mod access;
 mod builtin;
 pub(crate) mod delimited;
 mod fixed;
@@ -223,14 +224,14 @@ impl ParserSpec {
                 let imp = regex_parser::RegexImp::from_regex(builtin::syslog5424().clone());
                 (imp.schema(&BTreeMap::new()), Imp::Regex(imp))
             }
-            ParserSpec::AccessCommon => {
-                let imp = regex_parser::RegexImp::from_regex(builtin::access_common().clone());
-                (imp.schema(&BTreeMap::new()), Imp::Regex(imp))
-            }
-            ParserSpec::AccessCombined => {
-                let imp = regex_parser::RegexImp::from_regex(builtin::access_combined().clone());
-                (imp.schema(&BTreeMap::new()), Imp::Regex(imp))
-            }
+            ParserSpec::AccessCommon => (
+                Schema::from_names(&access::COLUMNS, &BTreeMap::new()),
+                Imp::Access(access::Access::new(false)),
+            ),
+            ParserSpec::AccessCombined => (
+                Schema::from_names(&access::COLUMNS, &BTreeMap::new()),
+                Imp::Access(access::Access::new(true)),
+            ),
             ParserSpec::W3c { fields, kinds } => {
                 if fields.is_empty() {
                     return Err(ColumnsError::InvalidSpec(
@@ -301,6 +302,7 @@ impl ParserSpec {
 enum Imp {
     Delimited(delimited::Delimited),
     Regex(regex_parser::RegexImp),
+    Access(access::Access),
     Json(json::JsonImp),
     Logfmt(logfmt::LogfmtImp),
     W3c(delimited::W3c),
@@ -338,6 +340,7 @@ impl Parser {
         match &self.imp {
             Imp::Delimited(p) => p.parse(line, n),
             Imp::Regex(p) => p.parse(line, n),
+            Imp::Access(p) => p.parse(line, n),
             Imp::Json(p) => p.parse(line, n),
             Imp::Logfmt(p) => p.parse(line, n),
             Imp::W3c(p) => p.parse(line, n),

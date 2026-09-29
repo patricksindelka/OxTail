@@ -178,7 +178,9 @@ pub fn log4j_pattern_to_regex(pattern: &str) -> Result<String, ColumnsError> {
     let mut flex_trail = vec![false; n];
     for i in 0..n {
         if let Piece::Group {
-            pad_left, pad_right, ..
+            pad_left,
+            pad_right,
+            ..
         } = &mut pieces[i]
         {
             let (l, r) = (*pad_left, *pad_right);

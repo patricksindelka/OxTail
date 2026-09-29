@@ -1,8 +1,9 @@
 //! Per-line parse cost. Target: well under 2 microseconds for a typical
 //! ~200-byte delimited, logfmt or regex line.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use oxtail_columns::{ParserSpec, Query, Rfc3339Fallback, discover_logfmt_columns};
+use std::hint::black_box;
 
 fn bench_parsers(c: &mut Criterion) {
     let csv_line = "2026-09-29T10:00:01.123Z,INFO,web-01,GET,/api/v1/users/12345/orders,200,1532,\

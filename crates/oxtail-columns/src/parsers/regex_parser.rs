@@ -55,10 +55,10 @@ impl RegexImp {
         let caps = self.re.captures(line)?;
         let mut rec = Record::with_columns(n);
         for (i, &g) in self.groups.iter().enumerate() {
-            if let Some(m) = caps.get(g) {
-                if !m.as_str().is_empty() {
-                    rec.set_slice(i, line, m.range());
-                }
+            if let Some(m) = caps.get(g)
+                && !m.as_str().is_empty()
+            {
+                rec.set_slice(i, line, m.range());
             }
         }
         Some(rec)
