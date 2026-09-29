@@ -239,12 +239,30 @@ pub fn filter_panel(ui: &mut Ui, tab_id: u64, view: &mut DocView, colors: &Color
                         .selectable_value(&mut e.include, false, "Exclude")
                         .changed();
                 });
-            let resp = TextEdit::singleline(&mut e.text)
+            let bad_span = problems
+                .iter()
+                .find(|(idx, _)| *idx == i)
+                .and_then(|(_, p)| p.span.clone())
+                .filter(|_| e.query);
+            let err_bg = colors.resolve(&oxtail_highlight::ColorRef::subtle(
+                oxtail_highlight::SemanticColor::Error,
+            ));
+            let mut layouter = |ui: &Ui, text: &dyn egui::TextBuffer, _wrap: f32| {
+                query_layout(ui, text.as_str(), bad_span.as_ref(), err_bg)
+            };
+            let hint = if e.query {
+                "column query, e.g. level:ERROR status>=500"
+            } else {
+                "text or regex"
+            };
+            let mut edit = TextEdit::singleline(&mut e.text)
                 .id(Id::new(("filter-text", tab_id, i)))
-                .hint_text("text or regex")
-                .desired_width(260.0)
-                .show(ui)
-                .response;
+                .hint_text(hint)
+                .desired_width(260.0);
+            if e.query {
+                edit = edit.layouter(&mut layouter);
+            }
+            let resp = edit.show(ui).response;
             if focus_last && i == last {
                 resp.request_focus();
             }
@@ -253,29 +271,37 @@ pub fn filter_panel(ui: &mut Ui, tab_id: u64, view: &mut DocView, colors: &Color
                 toggled = true;
             }
             toggled |= ui
-                .toggle_value(&mut e.regex, ".*")
-                .on_hover_text("Regular expression")
+                .toggle_value(&mut e.query, "Q")
+                .on_hover_text(
+                    "Column query: level:ERROR  status>=500  duration>250ms  msg~\"timeout\"  -path:/health",
+                )
                 .changed();
-            let case_label = match e.case {
-                CaseMode::Smart | CaseMode::Sensitive => "Aa",
-                CaseMode::Insensitive => "aa",
-            };
-            if ui
-                .selectable_label(e.case != CaseMode::Smart, case_label)
-                .on_hover_text("Case: smart / sensitive / insensitive")
-                .clicked()
-            {
-                e.case = match e.case {
-                    CaseMode::Smart => CaseMode::Sensitive,
-                    CaseMode::Sensitive => CaseMode::Insensitive,
-                    CaseMode::Insensitive => CaseMode::Smart,
+            ui.add_enabled_ui(!e.query, |ui| {
+                toggled |= ui
+                    .toggle_value(&mut e.regex, ".*")
+                    .on_hover_text("Regular expression")
+                    .changed();
+                let case_label = match e.case {
+                    CaseMode::Smart | CaseMode::Sensitive => "Aa",
+                    CaseMode::Insensitive => "aa",
                 };
-                toggled = true;
-            }
-            toggled |= ui
-                .toggle_value(&mut e.whole_word, "W")
-                .on_hover_text("Whole word")
-                .changed();
+                if ui
+                    .selectable_label(e.case != CaseMode::Smart, case_label)
+                    .on_hover_text("Case: smart / sensitive / insensitive")
+                    .clicked()
+                {
+                    e.case = match e.case {
+                        CaseMode::Smart => CaseMode::Sensitive,
+                        CaseMode::Sensitive => CaseMode::Insensitive,
+                        CaseMode::Insensitive => CaseMode::Smart,
+                    };
+                    toggled = true;
+                }
+                toggled |= ui
+                    .toggle_value(&mut e.whole_word, "W")
+                    .on_hover_text("Whole word")
+                    .changed();
+            });
             if ui.button("\u{d7}").on_hover_text("Remove").clicked() {
                 remove = Some(i);
             }
@@ -316,6 +342,39 @@ pub fn filter_panel(ui: &mut Ui, tab_id: u64, view: &mut DocView, colors: &Color
     } else if typed {
         view.filter.edited(now);
     }
+}
+
+/// Lays out a query's text with the problem span marked (red background).
+fn query_layout(
+    ui: &Ui,
+    text: &str,
+    bad: Option<&std::ops::Range<usize>>,
+    err_bg: Color32,
+) -> std::sync::Arc<egui::Galley> {
+    use egui::text::{LayoutJob, TextFormat};
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let plain = TextFormat::simple(font.clone(), color);
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = f32::INFINITY;
+    match bad.and_then(|r| {
+        let ok = r.start < r.end
+            && r.end <= text.len()
+            && text.is_char_boundary(r.start)
+            && text.is_char_boundary(r.end);
+        ok.then(|| r.clone())
+    }) {
+        Some(r) => {
+            job.append(&text[..r.start], 0.0, plain.clone());
+            let mut bad_fmt = plain.clone();
+            bad_fmt.background = err_bg;
+            bad_fmt.underline = egui::Stroke::new(1.0, Color32::LIGHT_RED);
+            job.append(&text[r.clone()], 0.0, bad_fmt);
+            job.append(&text[r.end..], 0.0, plain);
+        }
+        None => job.append(text, 0.0, plain),
+    }
+    ui.fonts_mut(|f| f.layout_job(job))
 }
 
 /// What the status bar asks the application to do.

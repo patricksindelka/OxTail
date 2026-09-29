@@ -230,16 +230,13 @@ pub fn draw_header(
         Stroke::new(1.0, colors.border),
     );
     let scroll_clip = Rect::from_min_max(
-        pos2(
-            (g.text_left + CELL_PAD + g.pinned_w).min(g.text_right),
-            g.rect.top(),
-        ),
+        pos2((g.text_left + g.pinned_w).min(g.text_right), g.rect.top()),
         pos2(g.text_right, g.rect.bottom()),
     );
     let pinned_clip = Rect::from_min_max(
         pos2(g.text_left, g.rect.top()),
         pos2(
-            (g.text_left + CELL_PAD + g.pinned_w).min(g.text_right),
+            (g.text_left + g.pinned_w).min(g.text_right),
             g.rect.bottom(),
         ),
     );
@@ -253,7 +250,7 @@ pub fn draw_header(
         .chain(g.placements.iter().filter(|p| p.pinned))
         .collect();
     for p in order {
-        let x0 = g.text_left + CELL_PAD + p.x - if p.pinned { 0.0 } else { g.h_scroll };
+        let x0 = g.text_left + p.x - if p.pinned { 0.0 } else { g.h_scroll };
         let cell = Rect::from_min_max(pos2(x0, g.rect.top()), pos2(x0 + p.w, g.rect.bottom()));
         let clip = if p.pinned { pinned_clip } else { scroll_clip };
         let visible = cell.intersect(clip);
@@ -311,7 +308,7 @@ pub fn draw_header(
             && let Some(pp) = ui.input(|i| i.pointer.interact_pos())
             && g.rect.expand(40.0).contains(pp)
         {
-            let x_rel = pp.x - g.text_left - CELL_PAD;
+            let x_rel = pp.x - g.text_left;
             let to = layout.drop_index(g.placements, g.h_scroll, x_rel);
             if to != pos && to != pos + 1 {
                 events.push(HeaderEvent::Reorder(pos, to));
@@ -367,7 +364,7 @@ pub fn draw_header(
     strip.context_menu(|ui| columns_menu(ui, schema, layout, &mut events));
     // Drop indicator while dragging a header cell.
     if let Some(x) = drag_target {
-        let x_rel = x - g.text_left - CELL_PAD;
+        let x_rel = x - g.text_left;
         let to = layout.drop_index(g.placements, g.h_scroll, x_rel);
         // The line sits at the left edge of the column that would follow.
         let seen: Vec<usize> = layout
@@ -379,9 +376,9 @@ pub fn draw_header(
             .collect();
         let at = seen.iter().position(|&i| i >= to).unwrap_or(seen.len());
         let lx = match g.placements.get(at) {
-            Some(p) => g.text_left + CELL_PAD + p.x - if p.pinned { 0.0 } else { g.h_scroll },
+            Some(p) => g.text_left + p.x - if p.pinned { 0.0 } else { g.h_scroll },
             None => g.placements.last().map_or(g.text_left, |p| {
-                g.text_left + CELL_PAD + p.x + p.w - if p.pinned { 0.0 } else { g.h_scroll }
+                g.text_left + p.x + p.w - if p.pinned { 0.0 } else { g.h_scroll }
             }),
         };
         painter.vline(lx, g.rect.y_range(), Stroke::new(2.0, colors.accent));

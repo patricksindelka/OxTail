@@ -14,10 +14,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use oxtail_config::TimezoneSetting;
 use oxtail_core::{
     DocEvent, DocSnapshot, DocState, Document, EncodingChoice, Line, LineRequest, RequestId,
 };
-use oxtail_config::TimezoneSetting;
 use oxtail_search::MatchSet;
 
 use crate::filter::FilterState;
@@ -276,6 +276,16 @@ pub struct DocView {
     pub tz_setting: TimezoneSetting,
     /// The detail pane (selected record as key/value list) is open.
     pub detail_open: bool,
+    /// Column statistics.
+    pub stats: crate::stats::StatsState,
+    /// The export dialog.
+    pub export: crate::export::ExportState,
+    /// The parser chooser window.
+    pub chooser: crate::chooser::ChooserState,
+    /// The first lines of the file (read for profile selection).
+    pub sample: Vec<String>,
+    /// Wakes the event loop from worker threads.
+    pub wake: Arc<dyn Fn() + Send + Sync>,
     pending: HashMap<RequestId, Pending>,
     back_attempts: HashMap<u64, u32>,
     pending_px: f32,
@@ -334,6 +344,11 @@ impl DocView {
             tcache: TableCache::default(),
             tz_setting: TimezoneSetting::default(),
             detail_open: false,
+            stats: crate::stats::StatsState::default(),
+            export: crate::export::ExportState::default(),
+            chooser: crate::chooser::ChooserState::default(),
+            sample: Vec::new(),
+            wake: Arc::new(|| {}),
             pending: HashMap::new(),
             back_attempts: HashMap::new(),
             pending_px: 0.0,
@@ -357,11 +372,7 @@ impl DocView {
 
     /// Starts deciding the column structure on a worker thread (see
     /// [`crate::structure`]). `wake` requests a repaint when it is done.
-    pub fn begin_structure(
-        &mut self,
-        input: StructureInput,
-        wake: Arc<dyn Fn() + Send + Sync>,
-    ) {
+    pub fn begin_structure(&mut self, input: StructureInput, wake: Arc<dyn Fn() + Send + Sync>) {
         if let Some(tz) = &input.tz {
             self.tz_setting = tz.clone();
         }
@@ -431,6 +442,95 @@ impl DocView {
             self.galleys.borrow_mut().clear();
             self.filter.set_columns(self.st.query_context());
         }
+    }
+
+    /// Starts the column statistics worker for the current scope.
+    pub fn start_stats(&mut self) {
+        let Some(parser) = self.st.parser.clone() else {
+            self.toast("This file has no columns to summarise");
+            return;
+        };
+        let filter = (self.stats.scope == crate::stats::StatsScope::Filter && self.is_filtered())
+            .then(|| self.active_set())
+            .flatten();
+        let doc = Arc::clone(&self.doc);
+        let wake = Arc::clone(&self.wake);
+        self.stats.start(&doc, &parser, filter, wake);
+    }
+
+    /// Opens the save dialog for an export (on a worker thread).
+    pub fn choose_export_path(&mut self, suggested: &str) {
+        if self.export.choosing {
+            return;
+        }
+        self.export.choosing = true;
+        self.export.result = None;
+        self.export.chosen = Some(crate::export::pick_save_path(
+            self.export.format,
+            suggested,
+            Arc::clone(&self.wake),
+        ));
+    }
+
+    /// Starts writing the export to `path` with the dialog's settings.
+    pub fn start_export(&mut self, path: std::path::PathBuf) {
+        let Some(parser) = self.st.parser.clone() else {
+            return;
+        };
+        self.export.sync_columns(parser.schema().len());
+        let order: Vec<usize> = self.st.layout.cols.iter().map(|c| c.col).collect();
+        let columns = self.export.columns(&order);
+        if columns.is_empty() {
+            self.export.result = Some(crate::export::ExportMsg::Failed(
+                "Select at least one column".into(),
+            ));
+            return;
+        }
+        let filter = (self.export.filtered_only && self.is_filtered())
+            .then(|| self.active_set())
+            .flatten();
+        self.export.progress = (0, 0);
+        self.export.result = None;
+        self.export.job = Some(crate::export::ExportJob::start(
+            Arc::clone(&self.doc),
+            parser,
+            crate::export::ExportSpec {
+                path,
+                format: self.export.format,
+                columns,
+                filter,
+            },
+            Arc::clone(&self.wake),
+        ));
+    }
+
+    /// Polls the statistics and export workers (and the save dialog).
+    /// Returns whether a repaint is wanted.
+    pub fn poll_tools(&mut self) -> bool {
+        let mut repaint = self.stats.poll();
+        repaint |= self.export.poll();
+        if let Some(rx) = &self.export.chosen {
+            match rx.try_recv() {
+                Ok(Some(path)) => {
+                    self.export.chosen = None;
+                    self.export.choosing = false;
+                    self.start_export(path);
+                    repaint = true;
+                }
+                Ok(None) | Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.export.chosen = None;
+                    self.export.choosing = false;
+                    repaint = true;
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+            }
+        }
+        repaint
+    }
+
+    /// Whether a tool worker runs and the UI should poll for its messages.
+    pub fn tools_busy(&self) -> bool {
+        self.stats.running() || self.export.job.is_some() || self.export.choosing
     }
 
     /// The widest visible cell of the column at display position `pos`, in
@@ -676,6 +776,7 @@ impl DocView {
             }
             Some(ReqKind::Sniff) => {
                 self.sniffed = Some(lines.iter().map(|l| l.text.clone()).collect());
+                self.sample = lines.iter().map(|l| l.text.clone()).collect();
                 self.insert_lines(generation, lines);
             }
             Some(ReqKind::Tail) => {

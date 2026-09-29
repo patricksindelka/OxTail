@@ -313,11 +313,14 @@ mod tests {
         ];
         let mut h = HighlightState::with_defaults();
         h.set_rules(rules, None);
-        let text = "127.0.0.1 - - [10/Oct/2000:13:55:36 -0700] \"GET /a HTTP/1.0\" 503 12 \"-\" \"curl\"";
+        let text =
+            "127.0.0.1 - - [10/Oct/2000:13:55:36 -0700] \"GET /a HTTP/1.0\" 503 12 \"-\" \"curl\"";
         let plain = h.prepare(&line(0, text));
         assert!(plain.hl.spans.is_empty() && plain.record.is_none());
         let epoch = h.epoch;
-        h.set_parser(Some(Arc::new(ParserSpec::AccessCombined.compile().unwrap())));
+        h.set_parser(Some(Arc::new(
+            ParserSpec::AccessCombined.compile().unwrap(),
+        )));
         assert!(h.epoch > epoch, "the painted lines must be invalidated");
         let p = h.prepare(&line(0, text));
         assert_eq!(p.hl.spans.len(), 1);

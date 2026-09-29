@@ -7,11 +7,12 @@ use egui::{Align2, Context, CornerRadius, Id, RichText, Sense, Ui, ViewportComma
 use oxtail_config::ThemeChoice;
 
 use crate::app::{OxTailApp, Windows};
+use crate::colui::{self, SuggestionAction};
 use crate::keymap::Action;
 use crate::logview::{self, ViewEnv};
 use crate::panels::{self, StatusAction};
 use crate::request::OpenRequest;
-use crate::tab::{TabContent, drop_index, move_item};
+use crate::tab::{Tab, TabContent, drop_index, move_item};
 
 impl OxTailApp {
     /// Draws one frame into `ui`.
@@ -221,6 +222,7 @@ impl OxTailApp {
                     self.settings.line_numbers = ln;
                     self.mark_settings_dirty();
                 }
+                self.columns_menu(ui);
                 ui.separator();
                 if ui
                     .add(egui::Button::new("Zoom in").shortcut_text("Ctrl+="))
@@ -259,6 +261,56 @@ impl OxTailApp {
                     ui.close();
                 }
             });
+        });
+    }
+
+    /// The "Columns" submenu of the View menu.
+    fn columns_menu(&mut self, ui: &mut Ui) {
+        let Some(view) = self.active_view_mut() else {
+            return;
+        };
+        ui.menu_button("Columns", |ui| {
+            let has_parser = view.st.parser.is_some();
+            let mut table = view.table_active();
+            if ui
+                .add_enabled(
+                    has_parser,
+                    egui::Checkbox::new(&mut table, "Show as columns"),
+                )
+                .changed()
+            {
+                view.set_table(table);
+            }
+            if ui.button("Choose parser\u{2026}").clicked() {
+                view.chooser.open = true;
+                ui.close();
+            }
+            let mut detail = view.detail_open;
+            if ui
+                .add_enabled(has_parser, egui::Checkbox::new(&mut detail, "Detail pane"))
+                .changed()
+            {
+                view.detail_open = detail;
+            }
+            ui.separator();
+            if ui
+                .add_enabled(has_parser, egui::Button::new("Statistics\u{2026}"))
+                .clicked()
+            {
+                view.stats.open = true;
+                ui.close();
+            }
+            if ui
+                .add_enabled(has_parser, egui::Button::new("Export\u{2026}"))
+                .clicked()
+            {
+                view.export.open = true;
+                ui.close();
+            }
+            if has_parser {
+                ui.separator();
+                ui.label(egui::RichText::new(format!("Format: {}", view.st.name)).weak());
+            }
         });
     }
 
@@ -466,7 +518,7 @@ impl OxTailApp {
                     self.close_tab(self.active);
                 }
             }
-            State::Ready => self.tab_ui(ui),
+            State::Ready => self.tab_ui(ui, self.active),
         }
     }
 
@@ -504,14 +556,15 @@ impl OxTailApp {
         }
     }
 
-    fn tab_ui(&mut self, ui: &mut Ui) {
+    fn tab_ui(&mut self, ui: &mut Ui, index: usize) {
         let now = Instant::now();
         let mut status_action = StatusAction::None;
         let mut history_changed = false;
+        let mut suggestion = SuggestionAction::None;
+        let mut copy: Option<String> = None;
         {
             let Self {
                 tabs,
-                active,
                 colors,
                 settings,
                 profiles,
@@ -519,7 +572,7 @@ impl OxTailApp {
                 style_epoch,
                 ..
             } = self;
-            let Some(tab) = tabs.get_mut(*active) else {
+            let Some(tab) = tabs.get_mut(index) else {
                 return;
             };
             let tab_id = tab.id;
@@ -527,23 +580,36 @@ impl OxTailApp {
                 return;
             };
             if view.find.open {
-                egui::Panel::top("find-bar").show(ui, |ui| {
+                egui::Panel::top(Id::new(("find-bar", tab_id))).show(ui, |ui| {
                     history_changed = panels::find_bar(ui, tab_id, view, history, colors, now);
                 });
             }
             if view.filter.open {
-                egui::Panel::top("filter-panel").show(ui, |ui| {
+                egui::Panel::top(Id::new(("filter-panel", tab_id))).show(ui, |ui| {
                     panels::filter_panel(ui, tab_id, view, colors, now);
                 });
             }
+            if view.st.suggestion.is_some() {
+                egui::Panel::top(Id::new(("suggest", tab_id))).show(ui, |ui| {
+                    suggestion = colui::suggestion_bar(ui, view, colors);
+                });
+            }
             if view.banner.is_some() {
-                egui::Panel::top("banner").show(ui, |ui| {
+                egui::Panel::top(Id::new(("banner", tab_id))).show(ui, |ui| {
                     panels::banner(ui, view, colors);
                 });
             }
-            egui::Panel::bottom("status").show(ui, |ui| {
+            egui::Panel::bottom(Id::new(("status", tab_id))).show(ui, |ui| {
                 status_action = panels::status_bar(ui, view, profiles);
             });
+            if view.detail_open && view.st.parser.is_some() {
+                egui::Panel::bottom(Id::new(("detail", tab_id)))
+                    .resizable(true)
+                    .default_size(170.0)
+                    .show(ui, |ui| {
+                        copy = colui::detail_pane(ui, view, colors);
+                    });
+            }
             let env = ViewEnv {
                 colors,
                 font_size: settings.font_size,
@@ -558,6 +624,17 @@ impl OxTailApp {
         }
         if history_changed {
             self.mark_history_dirty();
+        }
+        if let Some(text) = copy {
+            ui.ctx().copy_text(text);
+        }
+        if let Some(view) = self.tabs.get_mut(index).and_then(Tab::view_mut) {
+            match suggestion {
+                SuggestionAction::None => {}
+                SuggestionAction::Accept => view.accept_suggestion(),
+                SuggestionAction::Choose => view.chooser.open = true,
+                SuggestionAction::Dismiss => view.dismiss_suggestion(),
+            }
         }
         match status_action {
             StatusAction::None => {}
@@ -574,6 +651,12 @@ impl OxTailApp {
         self.settings_window(ctx);
         self.shortcuts_window(ctx);
         self.about_window(ctx);
+        let colors = self.colors.clone();
+        if let Some(view) = self.active_view_mut() {
+            colui::chooser_window(ctx, view);
+            colui::stats_window(ctx, view, &colors);
+            colui::export_window(ctx, view, &colors);
+        }
         if self.rule_editor.open {
             let preview: Vec<String> = self
                 .active_view()

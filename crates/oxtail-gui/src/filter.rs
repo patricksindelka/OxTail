@@ -383,7 +383,12 @@ impl FilterState {
             .iter()
             .any(|e| e.enabled && e.query && !e.text.is_empty())
         {
-            s.push_str(&self.columns.as_ref().map_or(String::new(), |c| c.signature()));
+            s.push_str(
+                &self
+                    .columns
+                    .as_ref()
+                    .map_or(String::new(), |c| c.signature()),
+            );
         }
         s
     }

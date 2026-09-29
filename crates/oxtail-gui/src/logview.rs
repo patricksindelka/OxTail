@@ -24,6 +24,8 @@ use crate::docview::DocView;
 use crate::highlight::{HighlightState, Prepared};
 use crate::minimap::{bin_matches, bin_of, bin_points, click_fraction, intensity};
 use crate::scroll::{Row, Visible};
+use crate::table::{CellKey, HEADER_EXTRA, HeaderGeometry, draw_header};
+use crate::tablepaint::{TableRow, paint_table_row};
 use crate::text::{JobOptions, build_job, clean_ranges, compose};
 use crate::viewport::{TrackClick, classify_click, digits, position_at, thumb_px};
 
@@ -294,10 +296,14 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     let row_h = round_to_pixel(env.font_size * env.line_height, ppp);
     let char_w = ctx.fonts_mut(|f| f.glyph_width(&font, '0')).max(1.0);
 
-    let full = ui.available_rect_before_wrap();
-    ui.allocate_rect(full, Sense::hover());
-    let painter = ui.painter_at(full);
-    painter.rect_filled(full, CornerRadius::ZERO, colors.background);
+    // In table mode the header sits above the body; `full` is the body.
+    let table = view.table_active();
+    let header_h = if table { row_h + HEADER_EXTRA } else { 0.0 };
+    let outer = ui.available_rect_before_wrap();
+    ui.allocate_rect(outer, Sense::hover());
+    let painter = ui.painter_at(outer);
+    painter.rect_filled(outer, CornerRadius::ZERO, colors.background);
+    let full = Rect::from_min_max(pos2(outer.left(), outer.top() + header_h), outer.max);
 
     // ---- geometry
     let snapshot = Arc::clone(&view.snapshot);
@@ -316,7 +322,10 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     let text_left = full.left() + gutter_w;
     let text_right = (full.right() - right_w).max(text_left + 20.0);
     let text_w = text_right - text_left;
-    let need_hbar = !view.wrap && view.max_text_w + PAD * 2.0 > text_w;
+    if table {
+        view.max_text_w = view.st.layout.total_width(char_w);
+    }
+    let need_hbar = (!view.wrap || table) && view.max_text_w + PAD * 2.0 > text_w;
     let bottom = full.bottom() - if need_hbar { HBAR_H } else { 0.0 };
     let text_rect = rect_between(pos2(text_left, full.top()), pos2(text_right, bottom));
     let gutter_rect = rect_between(pos2(full.left(), full.top()), pos2(text_left, bottom));
@@ -353,7 +362,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     }
 
     // ---- rows
-    let wrap_w = view.wrap.then(|| (text_w - PAD * 2.0).max(char_w * 8.0));
+    let wrap_w = (view.wrap && !table).then(|| (text_w - PAD * 2.0).max(char_w * 8.0));
     let hl = Rc::clone(&view.hl);
     let galleys = Rc::clone(&view.galleys);
     galleys.borrow_mut().begin_frame();
@@ -367,6 +376,8 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         .style_epoch
         .wrapping_mul(1_000_003)
         .wrapping_add(hl.borrow().epoch)
+        .wrapping_mul(1_000_003)
+        .wrapping_add(view.st.epoch)
         .wrapping_mul(1_000_003)
         .wrapping_add(view.find.epoch)
         .wrapping_mul(2)
@@ -399,19 +410,34 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
 
     // Horizontal scroll range.
     let mut widest = view.max_text_w;
-    let mut laid: Vec<(Arc<Prepared>, Arc<Galley>)> = Vec::with_capacity(vis.rows.len());
+    let mut laid: Vec<(Arc<Prepared>, Option<Arc<Galley>>)> = Vec::with_capacity(vis.rows.len());
     for r in &vis.rows {
-        let (p, g) = layout_line(&ctx, &hl, &galleys, &lopts, &r.line);
-        widest = widest.max(g.size().x);
-        laid.push((p, g));
+        if table {
+            laid.push((hl.borrow_mut().prepare(&r.line), None));
+        } else {
+            let (p, g) = layout_line(&ctx, &hl, &galleys, &lopts, &r.line);
+            widest = widest.max(g.size().x);
+            laid.push((p, Some(g)));
+        }
     }
-    view.max_text_w = widest;
+    if !table {
+        view.max_text_w = widest;
+    }
     let max_h = (view.max_text_w + PAD * 2.0 - text_w).max(0.0);
-    view.h_scroll = if view.wrap {
+    view.h_scroll = if view.wrap && !table {
         0.0
     } else {
         view.h_scroll.clamp(0.0, max_h)
     };
+    // Table geometry.
+    let placements = if table {
+        view.st.layout.placements(text_w, char_w)
+    } else {
+        Vec::new()
+    };
+    let pinned_w: f32 = placements.iter().filter(|p| p.pinned).map(|p| p.w).sum();
+    let mut tcache = std::mem::take(&mut view.tcache);
+    tcache.begin_frame();
 
     // ---- paint rows
     let text_painter = painter.with_clip_rect(text_rect);
@@ -471,11 +497,42 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
             );
         }
         // Text.
-        text_painter.galley(
-            pos2(text_rect.left() + PAD - view.h_scroll, y),
-            Arc::clone(galley),
-            colors.text,
-        );
+        if let Some(galley) = galley {
+            text_painter.galley(
+                pos2(text_rect.left() + PAD - view.h_scroll, y),
+                Arc::clone(galley),
+                colors.text,
+            );
+        } else {
+            let dimmed = set.as_deref().is_some_and(|s| {
+                s.is_context(s.rank(row.line.offset)) && s.contains(row.line.offset)
+            });
+            let key = CellKey {
+                epoch,
+                current: current == Some(row.line.offset),
+                dimmed,
+            };
+            paint_table_row(
+                &TableRow {
+                    ctx: &ctx,
+                    view: &*view,
+                    colors,
+                    font: &font,
+                    row_h,
+                    char_w,
+                    y,
+                    text_rect,
+                    placements: &placements,
+                    pinned_w,
+                    prepared,
+                    line: &row.line,
+                    key,
+                    matcher: matcher.as_ref(),
+                },
+                &mut tcache,
+                &painter,
+            );
+        }
         // Gutter: bookmark, rule marker, number.
         let marker_c = pos2(gutter_row.left() + MARKER_W * 0.5, y + row_h * 0.5);
         if row.line.number_exact && view.bookmarks.contains_key(&row.line.number) {
@@ -518,6 +575,73 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     }
     for (n, o) in bookmark_updates {
         view.learn_bookmark_offset(n, o);
+    }
+    view.tcache = tcache;
+    if table {
+        // Column separators.
+        let sep = mix32(colors.background, colors.border, 0.6);
+        let body = painter.with_clip_rect(text_rect);
+        for p in &placements {
+            let x = text_left + p.x + p.w - if p.pinned { 0.0 } else { view.h_scroll };
+            let min_x = if p.pinned {
+                text_left
+            } else {
+                text_left + pinned_w
+            };
+            if x >= min_x && x <= text_right {
+                body.vline(x - 0.5, text_rect.y_range(), Stroke::new(1.0, sep));
+            }
+        }
+        // Header.
+        if let Some(parser) = view.st.parser.clone() {
+            let geo = HeaderGeometry {
+                rect: Rect::from_min_max(
+                    pos2(outer.left(), outer.top()),
+                    pos2(text_right, full.top()),
+                ),
+                text_left,
+                text_right,
+                h_scroll: view.h_scroll,
+                pinned_w,
+                char_w,
+                placements: &placements,
+            };
+            let events = draw_header(
+                ui,
+                id.with("header"),
+                &geo,
+                parser.schema(),
+                &view.st.layout,
+                colors,
+                &font,
+            );
+            if !events.is_empty() {
+                let mut fits = HashMap::new();
+                for ev in &events {
+                    if let crate::table::HeaderEvent::Autofit(pos) = ev {
+                        fits.insert(*pos, view.widest_cell(*pos));
+                    }
+                }
+                let widest = |pos: usize| fits.get(&pos).copied().unwrap_or(0);
+                if crate::table::apply_events(
+                    &mut view.st.layout,
+                    parser.schema(),
+                    &events,
+                    &widest,
+                ) {
+                    view.st.dirty = true;
+                }
+            }
+            // The corner above the scrollbar and minimap.
+            painter.rect_filled(
+                Rect::from_min_max(
+                    pos2(text_right, outer.top()),
+                    pos2(outer.right(), full.top()),
+                ),
+                CornerRadius::ZERO,
+                colors.gutter_bg,
+            );
+        }
     }
     // Gutter / text separator.
     painter.vline(

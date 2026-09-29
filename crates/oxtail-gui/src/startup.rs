@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::{Receiver, unbounded};
 use oxtail_config::{DataDir, PathMapper, ProfileSet, Session, Settings, ThemeSet};
 
+use crate::guistate::{GUI_STATE_FILE, GuiState};
 use crate::request::OpenRequest;
 
 /// Configuration loaded at startup.
@@ -27,6 +28,8 @@ pub struct Startup {
     pub themes: Arc<ThemeSet>,
     /// Saved search queries, most recent first.
     pub history: Vec<String>,
+    /// GUI-side state (column choices, pane layout, merged tabs).
+    pub gui_state: GuiState,
     /// Non-fatal problems met while loading (shown as a banner).
     pub warnings: Vec<String>,
     /// Converts paths for the session file.
@@ -82,7 +85,14 @@ pub fn load_startup(data_dir: DataDir) -> Startup {
         .and_then(|r| std::fs::read(r.join(HISTORY_FILE)).ok())
         .and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok())
         .unwrap_or_default();
+    let gui_state = data_dir
+        .root
+        .as_ref()
+        .and_then(|r| std::fs::read(r.join(GUI_STATE_FILE)).ok())
+        .map(|b| GuiState::parse(&b))
+        .unwrap_or_default();
     Startup {
+        gui_state,
         data_dir,
         settings,
         session,

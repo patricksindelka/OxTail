@@ -22,13 +22,14 @@ use crate::alerts::{AlertEvent, AlertJob, AlertWorker, DesktopNotifier};
 use crate::colors::{Colors, select_theme};
 use crate::docview::{BookmarkInfo, DocView, ViewInit};
 use crate::find::{Dir, push_history};
+use crate::guistate::GuiState;
 use crate::keymap::{self, Action};
 use crate::persist::{Job, Persist, PersistResult};
 use crate::request::OpenRequest;
 use crate::ruleeditor::{EditorAction, RuleEditor};
 use crate::rules::profile_with_rules;
 use crate::startup::{AppInit, ExternalOpen};
-use crate::tab::{Tab, TabContent, TabInit, apply_sniffed_profile, build_session};
+use crate::tab::{StructureCtx, Tab, TabContent, TabInit, apply_sniffed_profile, build_session};
 
 /// How often the session is saved when something changed.
 pub const SESSION_SAVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -125,6 +126,9 @@ pub struct OxTailApp {
     last_session_save: Instant,
     settings_dirty_at: Option<Instant>,
     pub(crate) history_dirty: bool,
+    /// GUI-side state (column choices, pane layout, merged tabs).
+    pub(crate) gui_state: GuiState,
+    last_saved_gui_state: Option<GuiState>,
     pub(crate) last_title: String,
     pub(crate) file_dialog_requested: bool,
     pub(crate) window: Option<WindowGeometry>,
@@ -206,6 +210,8 @@ impl OxTailApp {
             last_session_save: Instant::now(),
             settings_dirty_at: None,
             history_dirty: false,
+            gui_state: startup.gui_state,
+            last_saved_gui_state: None,
             last_title: String::new(),
             file_dialog_requested: false,
             window: startup.session.window,
@@ -480,6 +486,7 @@ impl OxTailApp {
                         initial_line: init.initial_line,
                     },
                 );
+                view.wake = self.waker();
                 if !init.filters.is_empty() {
                     view.filter.set_from_query_strings(&init.filters);
                     view.filter.open = true;
@@ -794,13 +801,29 @@ impl OxTailApp {
         let profiles = Arc::clone(&self.profiles);
         let notify = self.settings.notifications_enabled;
         let mut copied: Option<String> = None;
+        let tz = self.settings.timezone.clone();
+        let wake = self.waker();
         for i in 0..self.tabs.len() {
             let tab = &mut self.tabs[i];
             let (tab_id, title) = (tab.id, tab.title.clone());
+            let path = tab.path.clone();
             let Some(view) = tab.view_mut() else { continue };
+            view.set_time_zone(&tz);
             let out = view.pump(now);
+            if view.st.dirty {
+                view.st.dirty = false;
+                if let Some(p) = &path {
+                    self.gui_state.set_structure(p, view.st.saved());
+                }
+            }
             if out.repaint {
                 ctx.request_repaint();
+            }
+            if view.poll_tools() {
+                ctx.request_repaint();
+            }
+            if view.tools_busy() {
+                ctx.request_repaint_after(Duration::from_millis(100));
             }
             if let Some(text) = out.copied {
                 if out.copy_truncated {
@@ -848,7 +871,15 @@ impl OxTailApp {
                     })
                 });
             if let Some(lines) = sniffed {
-                apply_sniffed_profile(&mut self.tabs[i], &profiles, &lines);
+                let sctx = StructureCtx {
+                    saved: path
+                        .as_deref()
+                        .and_then(|p| self.gui_state.structure(p))
+                        .cloned(),
+                    tz: tz.clone(),
+                    wake: Arc::clone(&wake),
+                };
+                apply_sniffed_profile(&mut self.tabs[i], &profiles, &lines, sctx);
             }
             if let Some(job) = job
                 && let Some(w) = &self.alerts
@@ -1196,12 +1227,26 @@ impl OxTailApp {
     /// Uses `profile` (or the default rules) in the active tab.
     pub fn set_profile(&mut self, profile: Option<String>) {
         let profiles = Arc::clone(&self.profiles);
+        let tz = self.settings.timezone.clone();
+        let wake = self.waker();
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.forced_profile.clone_from(&profile);
             tab.customized = false;
             if let Some(v) = tab.view_mut() {
                 let p = profile.as_deref().and_then(|n| profiles.by_name(n));
                 v.hl.borrow_mut().set_profile(p);
+                // The new profile may define columns; a parser the user chose
+                // for this file stays.
+                let chosen = matches!(
+                    v.st.origin,
+                    Some(crate::structure::Origin::Chosen | crate::structure::Origin::Restored)
+                );
+                let saved = chosen.then(|| v.st.saved());
+                let profile_for_columns = p.or_else(|| profiles.by_name("Generic"));
+                v.begin_structure(
+                    crate::tab::structure_input(profile_for_columns, saved, tz),
+                    wake,
+                );
             }
         }
     }
@@ -1301,6 +1346,14 @@ impl OxTailApp {
             self.last_saved_session = Some(s.clone());
             self.send_persist(Job::Session(s));
         }
+        self.save_gui_state_if_changed();
+    }
+
+    fn save_gui_state_if_changed(&mut self) {
+        if self.last_saved_gui_state.as_ref() != Some(&self.gui_state) {
+            self.last_saved_gui_state = Some(self.gui_state.clone());
+            self.send_persist(Job::GuiState(Box::new(self.gui_state.clone())));
+        }
     }
 
     /// Saves everything and stops the worker threads (called when the window
@@ -1308,6 +1361,7 @@ impl OxTailApp {
     pub fn shutdown(&mut self) {
         let s = self.current_session();
         self.send_persist(Job::Session(s));
+        self.save_gui_state_if_changed();
         if self.settings_dirty_at.take().is_some() {
             self.send_persist(Job::Settings(self.settings.clone()));
         }
