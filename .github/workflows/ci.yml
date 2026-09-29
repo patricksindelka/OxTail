@@ -1,18 +1,35 @@
 name: CI
 
-# One job per platform does everything on one runner, so the toolchain and the
-# crates are set up and cached once: format (Linux), clippy, tests, the release
-# build, the dependency/size check, and the packages. Every push therefore
-# builds real, downloadable packages (unsigned unless the signing secrets
-# exist, see packaging/README.md). A `v*` tag additionally publishes them as a
-# GitHub Release. Fuzzing is one extra job.
+# GitHub bills private-repo minutes with multipliers (Linux 1x, Windows 2x,
+# macOS 10x) and rounds every job up to a whole minute, so:
+#   * branch pushes and pull requests: ONE Linux job (format, clippy, tests).
+#   * the full matrix (Linux, Windows, macOS: tests, release build, dependency/
+#     size check, packages; plus fuzzing) runs only when started by hand
+#     (Actions > CI > Run workflow, "full" ticked) and on `v*` tags, which then
+#     publish the packages as a GitHub Release (packaging/README.md).
+#   * changes that only touch docs or Markdown do not run CI at all.
+# Each platform job sets up the toolchain and cache once and does everything on
+# one runner.
 
 on:
   push:
     branches: ['**']
     tags: ['v*']
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '.github/workflows/docs.yml'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
+    inputs:
+      full:
+        description: Full matrix (Windows and macOS too, release builds, packages, fuzzing)
+        type: boolean
+        default: true
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -24,6 +41,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # 'true' for a manual full run or a release tag: builds and packages everything.
+  FULL: ${{ github.event.inputs.full == 'true' || startsWith(github.ref, 'refs/tags/v') }}
   # No RUSTFLAGS here: it would replace the target rustflags in .cargo/config.toml
   # (the static CRT on Windows) and change the flags between steps, which forces
   # rebuilds. Warnings are denied through clippy instead.
@@ -41,18 +60,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Linux
-            os: ubuntu-latest
-            targets: x86_64-unknown-linux-gnu
-          - name: Windows
-            os: windows-latest
-            targets: x86_64-pc-windows-msvc
-          - name: macOS
-            os: macos-latest
-            targets: aarch64-apple-darwin,x86_64-apple-darwin
+        include: ${{ fromJSON((github.event.inputs.full == 'true' || startsWith(github.ref, 'refs/tags/v')) && '[{"name":"Linux","os":"ubuntu-latest","targets":"x86_64-unknown-linux-gnu"},{"name":"Windows","os":"windows-latest","targets":"x86_64-pc-windows-msvc"},{"name":"macOS","os":"macos-latest","targets":"aarch64-apple-darwin,x86_64-apple-darwin"}]' || '[{"name":"Linux","os":"ubuntu-latest","targets":"x86_64-unknown-linux-gnu"}]') }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 60
     env:
       WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
       WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
@@ -88,7 +98,7 @@ jobs:
 
       # --------------------------------------------------------- release build
       - name: Build (Linux, glibc ${{ env.GLIBC_BASELINE }})
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && env.FULL == 'true'
         run: |
           python3 -m pip install --user --break-system-packages --quiet "ziglang==$ZIGLANG_VERSION"
           # cargo-zigbuild lands in ~/.cargo/bin, which rust-cache keeps between runs.
@@ -125,7 +135,7 @@ jobs:
 
       # ------------------------------------------------------- Linux packages
       - name: Linux packages (tar.gz, AppImage, deb, rpm)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && env.FULL == 'true'
         run: |
           id=io.github.patricksindelka.OxTail
           sudo apt-get install -y -qq desktop-file-utils appstream > /dev/null
@@ -278,6 +288,7 @@ jobs:
         run: security delete-keychain "$RUNNER_TEMP/oxtail-signing.keychain-db" || true
 
       - uses: actions/upload-artifact@v6
+        if: env.FULL == 'true'
         with:
           name: oxtail-${{ matrix.name }}
           path: dist/out/*
@@ -287,6 +298,8 @@ jobs:
   fuzz:
     # cargo-fuzz needs nightly. The build must pass; the short timed runs report
     # findings (warnings and uploaded crash inputs) without failing the build.
+    # Full runs only (manual or release tag).
+    if: github.event.inputs.full == 'true' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

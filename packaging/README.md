@@ -23,9 +23,11 @@ The application id (bundle id, Flatpak id, desktop file name, AppStream id) is
 1. Bump `version` in the root `Cargo.toml` (`[workspace.package]`) and add a
    `<release version="X.Y.Z" date="...">` entry to
    `linux/io.github.patricksindelka.OxTail.metainfo.xml`. Commit.
-2. Push and wait for CI to go green. Every CI run already builds all the
-   packages and uploads them as workflow artifacts (`oxtail-Linux`,
-   `oxtail-Windows`, `oxtail-macOS`), so the release is exactly what CI tested.
+2. Start a full CI run first: Actions, "CI", "Run workflow", keep "full" ticked.
+   It tests on all three platforms and builds every package as workflow artifacts
+   (`oxtail-Linux`, `oxtail-Windows`, `oxtail-macOS`) without publishing. Ordinary
+   pushes only run Linux checks, to save Actions minutes (macOS minutes count 10x,
+   Windows 2x on private repositories).
 3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. CI runs in full on
    the tag (`version.sh` fails if the tag differs from the crate version), then
    the `publish` job creates the GitHub Release (pre-release if the version
