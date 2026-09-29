@@ -10,7 +10,7 @@ searches them fast, highlights them richly, and understands their structure
 ## 1. Goals and non-goals
 
 ### What BareTail gets right (keep)
-- Opens instantly, tiny footprint, single executable, no install required.
+- Opens instantly, tiny footprint, single executable, no install required (portable).
 - Follows files in real time ("tail -f") without locking them for the writer.
 - Handles files of any size.
 - Simple line highlighting by keyword.
@@ -19,7 +19,7 @@ searches them fast, highlights them richly, and understands their structure
 ### What BareTail lacks (fix)
 | Area | BareTail | OxTail |
 |---|---|---|
-| Platforms | Windows only | Windows, macOS, Linux |
+| Platforms | Windows only | Windows, macOS, Linux; portable single executable on each (section 3) |
 | Search | Free version: none; Pro: basic, separate tool (BareGrep) | Built-in incremental literal/regex search, filter views, match minimap |
 | Highlighting | Whole-line color per keyword | Per-match or per-line, regex, priorities, per-column rules, profiles, ANSI colors |
 | Structure | Plain text only | Column parsing: CSV/TSV, regex, JSON Lines, logfmt, syslog, Apache/Nginx, W3C/IIS, fixed-width |
@@ -30,7 +30,7 @@ searches them fast, highlights them richly, and understands their structure
 ### Non-goals (v1)
 - Not a log aggregation platform (no server, no ingestion pipeline, no database).
 - Not an editor: files are read-only.
-- No remote sources in v1 (SSH / Docker / journald are post-1.0 stretch goals, section 12).
+- No remote sources in v1 (SSH / Docker / journald are post-1.0 stretch goals, section 13).
 
 ---
 
@@ -55,7 +55,63 @@ scan.** Every expensive operation is chunked, cancellable, and reports progress.
 
 ---
 
-## 3. Technology choices
+## 3. Portability (first-class requirement)
+
+OxTail must run as a **portable app**: copy one file (or one folder) anywhere,
+including a USB stick, a network share or a locked-down server, and run it. No
+installer, no admin rights, no runtime to install first, and no traces left on
+the machine. Installers exist only as a convenience and use the same binary.
+
+### 3.1 Requirements
+| Requirement | How |
+|---|---|
+| **Single self-contained executable** | Fonts, icons, themes, built-in profiles and presets are embedded in the binary (`include_bytes!`). Nothing else ships with it. |
+| **No runtime dependencies** | Windows: CRT statically linked (`+crt-static`), so no Visual C++ redistributable and no .NET. Linux: built against an old glibc baseline (e.g. 2.28 via `cargo-zigbuild`); X11/Wayland/GL libraries are loaded at runtime (`dlopen`) so one binary runs on X11 and Wayland. macOS: universal (arm64 + x86_64) `.app`. |
+| **No admin rights** | Never writes to `Program Files`, `/usr`, `HKLM` or other system locations. |
+| **No traces** | In portable mode: no registry writes, no files outside the data folder, and temp files (e.g. the stdin spool) are deleted on exit and cleaned up on the next start after a crash. |
+| **Settings travel with the app** | See 3.2. |
+| **Works without a GPU** | Renderer fallback chain: wgpu (DX12 / Metal / Vulkan), then OpenGL (`glow`), then a software rasterizer (WARP on Windows, llvmpipe on Linux when present). This matters over RDP, in VMs and on servers, which is where people tail logs. Selectable with `--renderer`. |
+| **Small** | Binary < 20 MB (compressed download < 8 MB). Release profile with LTO, `codegen-units = 1`, `strip`, `panic = "abort"`. |
+| **Opt-in system integration** | File associations, "Open with OxTail" context menu entry and a Start menu shortcut only through an explicit "Integrate with system" action in Settings, with a matching "Remove" action. |
+| **No phoning home** | The update check is off by default in portable mode. When enabled, it downloads the new executable next to the old one and swaps it on restart; no background service. |
+
+### 3.2 Where settings live
+Resolved at startup, in this order:
+1. `--data-dir <path>` on the command line.
+2. **Portable mode**: a `portable` marker file or an `oxtail-data/` folder next to
+   the executable. Everything (config, profiles, themes, session, bookmarks,
+   recent files) lives in `oxtail-data/`. The portable `.zip` ships with the marker,
+   so it is portable by default.
+3. **Installed mode**: the platform config directory (`%APPDATA%\OxTail`,
+   `~/Library/Application Support/OxTail`, `$XDG_CONFIG_HOME/oxtail`).
+
+Details:
+- If the executable's folder is read-only (e.g. a read-only share, or macOS App
+  Translocation of an unmoved download), OxTail runs with in-memory settings,
+  shows a banner explaining why, and offers to pick a data folder.
+- Paths in the session and recent-file list are stored **relative to the
+  executable** when they are on the same volume, so a USB stick that gets a different
+  drive letter (`E:` today, `F:` tomorrow) still restores correctly.
+- Writes are atomic (write to a temp file, then rename), so pulling the USB stick
+  cannot corrupt the configuration.
+- The single-instance lock/pipe name is derived from the data folder, so two
+  portable copies (e.g. different versions) never talk to each other.
+- "Export settings" / "Import settings" produce one `.zip`, for moving between an
+  installed and a portable copy.
+
+### 3.3 Deliverables per platform
+| Platform | Portable (primary) | Optional installer |
+|---|---|---|
+| Windows x64 / ARM64 | `oxtail.exe` in a `.zip` (with `portable` marker) | MSI (per-user, no admin), `winget`, Scoop |
+| macOS | Notarized `OxTail.app` in a `.zip` (run from anywhere) | DMG, Homebrew cask |
+| Linux x64 / ARM64 | Plain binary in a `.tar.gz`, plus an AppImage | Flatpak, `.deb`, `.rpm` |
+
+All executables are code-signed, so SmartScreen and Gatekeeper don't block the
+portable copy.
+
+---
+
+## 4. Technology choices
 
 | Concern | Choice | Why |
 |---|---|---|
@@ -74,13 +130,13 @@ scan.** Every expensive operation is chunked, cancellable, and reports progress.
 | Notifications | `notify-rust` | Desktop alert on a watched pattern |
 | Diagnostics | `tracing` | Structured internal logging |
 | Test/bench | `criterion`, `proptest`, `cargo-fuzz`, `insta` (snapshots) | Parsers and index must be correct on hostile input |
-| Distribution | `cargo-dist` | Signed installers plus portable archives |
+| Distribution | `cargo-dist`, `cargo-zigbuild` | Portable archives first, signed installers second (section 3.3) |
 
 ---
 
-## 4. Architecture
+## 5. Architecture
 
-### 4.1 Workspace layout
+### 5.1 Workspace layout
 
 ```
 oxtail/
@@ -101,7 +157,7 @@ oxtail/
 The core crates have no GUI dependency, so they can be tested headlessly and
 reused by a future TUI (`ratatui`) front end.
 
-### 4.2 Threading model
+### 5.2 Threading model
 
 ```
             ┌──────────────┐  commands (open, scroll-to, search, cancel)
@@ -127,7 +183,7 @@ reused by a future TUI (`ratatui`) front end.
 - Results arrive **incrementally** (e.g. search hits appear in the minimap as
   they are found).
 
-### 4.3 Reading large files
+### 5.3 Reading large files
 
 **Positioned reads plus an LRU block cache, not a whole-file mmap.**
 - On Windows, a memory-mapped view blocks other processes from truncating the
@@ -145,7 +201,7 @@ reused by a future TUI (`ratatui`) front end.
 `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` so writers, rotators and
 deleters are never blocked. This is BareTail's key behavior and must be kept.
 
-### 4.4 Line index
+### 5.4 Line index
 
 A dense index (one `u64` per line) costs 800 MB for 100M lines. Use a
 **sparse checkpoint index** instead:
@@ -168,7 +224,7 @@ A dense index (one `u64` per line) costs 800 MB for 100M lines. Use a
   configurable length (default 16 KB) with a "show full line" action. The index
   treats them normally.
 
-### 4.5 Following, truncation and rotation
+### 5.5 Following, truncation and rotation
 
 - Growth: a `notify` event, or a poll at 250 ms (adaptive, backs off when idle),
   triggers an incremental index of only the new tail.
@@ -182,7 +238,7 @@ A dense index (one `u64` per line) costs 800 MB for 100M lines. Use a
 - Optional: detect a file that is being replaced (e.g. `copytruncate`) and keep
   a "previous content" marker.
 
-### 4.6 Encodings
+### 5.6 Encodings
 
 - Detection order: BOM, then UTF-16 heuristics (NUL patterns), then `chardetng`
   on the first 64 KB, then fall back to UTF-8 with lossy replacement.
@@ -193,9 +249,9 @@ A dense index (one `u64` per line) costs 800 MB for 100M lines. Use a
 
 ---
 
-## 5. Search
+## 6. Search
 
-### 5.1 Modes
+### 6.1 Modes
 - **Find** (`Ctrl+F`): incremental; highlights all matches; `F3`/`Shift+F3` next/prev;
   live match count ("1,204 of ≥ 58,311", refined as scanning continues).
 - Options: literal / regex / whole word / case sensitivity (smart-case default),
@@ -208,11 +264,11 @@ A dense index (one `u64` per line) costs 800 MB for 100M lines. Use a
   - Toggle between the filtered view and the full view while keeping the cursor
     on the same source line.
 - **Column-scoped search** once columns are defined: `level:ERROR`,
-  `status>=500`, `duration>1s` (a small query language, section 7.4).
+  `status>=500`, `duration>1s` (a small query language, section 8.4).
 - **Search across open tabs** with a results panel grouped by file.
 - History and saved searches, available from the command palette.
 
-### 5.2 Engine
+### 6.2 Engine
 - Literal: `memchr::memmem` (SIMD). Multiple literals: `aho-corasick`.
 - Regex: `regex-automata` meta engine. The **required-literal prefilter** is
   extracted and used to skip non-candidate blocks quickly, and only candidate
@@ -227,17 +283,17 @@ A dense index (one `u64` per line) costs 800 MB for 100M lines. Use a
   the match set. 10M matches ≈ 80 MB worst case, or much less with Roaring.
 - Cancelled instantly when the query changes (generation token).
 
-### 5.3 Navigation
+### 6.3 Navigation
 - **Minimap / match scrollbar**: a vertical strip showing search hits and
   highlight-rule hits as colored ticks, density-binned for huge files. Click to jump.
 - Bookmarks (`Ctrl+F2` toggle, `F2` next), with optional labels; persisted per file.
-- Go to line (`Ctrl+G`), go to byte offset, and go to timestamp (section 8).
+- Go to line (`Ctrl+G`), go to byte offset, and go to timestamp (section 9).
 
 ---
 
-## 6. Highlighting
+## 7. Highlighting
 
-### 6.1 Rules
+### 7.1 Rules
 Each rule has:
 - **Matcher**: literal, regex, or a column condition (`level == "WARN"`).
 - **Scope**: whole line / match only / capture group(s) / a specific column.
@@ -249,7 +305,7 @@ Each rule has:
   matches while following, with rate limiting), **hide** (fold matching lines,
   e.g. noisy health checks), **bookmark automatically**.
 
-### 6.2 Profiles
+### 7.2 Profiles
 - Rules are grouped into **profiles** (e.g. "Java/log4j", "Nginx access",
   "Kubernetes JSON"). A profile also contains a column definition and a
   default filter.
@@ -264,7 +320,7 @@ Each rule has:
   - Stack traces (`at com.foo…`, `Traceback`, `panicked at`), with continuation
     lines grouped with their parent line.
 
-### 6.3 Rendering
+### 7.3 Rendering
 - All rules compile into **one** multi-pattern pass per visible line
   (`aho-corasick` for literals plus a `RegexSet` for regexes), producing style
   spans. Only visible lines are styled, and results are cached per line.
@@ -277,9 +333,9 @@ Each rule has:
 
 ---
 
-## 7. Columns (structured view)
+## 8. Columns (structured view)
 
-### 7.1 Parsers
+### 8.1 Parsers
 | Parser | Use | Notes |
 |---|---|---|
 | Delimited | CSV, TSV, `\|`, `;` | `csv-core`, quoted fields, header row detection |
@@ -292,7 +348,7 @@ Each rule has:
 | log4j / logback pattern | Paste a `%d %-5p [%t] %c - %m%n` pattern | Converted to a regex parser |
 | Fixed width | Mainframe or report output | Drag column boundaries on a ruler |
 
-### 7.2 Behavior
+### 8.2 Behavior
 - **Auto-detection**: sample the first and last ~1,000 lines, try each parser,
   and pick the best by coverage and consistency. The detected format is shown as
   a dismissible suggestion ("Looks like Nginx combined, show as columns?").
@@ -312,12 +368,12 @@ Each rule has:
   errors?".
 - **Export** the filtered view with the selected columns to CSV or JSON Lines.
 
-### 7.3 Sorting
+### 8.3 Sorting
 Sorting a 100M-line file interactively is not realistic. Sort is offered on
 **filtered views** below a threshold (default 1M rows) and runs in the
 background. For whole files, use "go to timestamp" instead.
 
-### 7.4 Query language (small, typed)
+### 8.4 Query language (small, typed)
 ```
 level:ERROR                        column equals (case-insensitive)
 level:(ERROR|FATAL)                alternatives
@@ -331,7 +387,7 @@ so beginners never need the syntax.
 
 ---
 
-## 8. Time and multiple files
+## 9. Time and multiple files
 
 - **Timestamp detection** per profile or automatically (the first timestamp-like
   token on a line). Supports many common formats, epoch seconds/ms/µs, and a
@@ -348,9 +404,9 @@ so beginners never need the syntax.
 
 ---
 
-## 9. User interface
+## 10. User interface
 
-### 9.1 Layout
+### 10.1 Layout
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ ☰  app.log ×  │ nginx/access.log ×  │ worker-*.log (merged) ×  │  +          │  tabs
@@ -369,7 +425,7 @@ so beginners never need the syntax.
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 9.2 Features
+### 10.2 Features
 - Tabs plus **splits** (horizontal/vertical, drag a tab onto an edge). Two views of
   the same file are possible, e.g. a filtered view on top and the full file below,
   with synchronized cursors.
@@ -392,7 +448,7 @@ so beginners never need the syntax.
   keyboard access, and a font size that scales with system DPI.
 - Localization-ready (Fluent), English at launch.
 
-### 9.3 CLI
+### 10.3 CLI
 ```
 oxtail app.log                         open (follow if the file is growing)
 oxtail -n 500 app.log                  start at the last 500 lines
@@ -406,10 +462,11 @@ local socket or named pipe).
 
 ---
 
-## 10. Configuration
+## 11. Configuration
 
-- `config.toml` in the platform config directory (`directories` crate), or next to
-  the executable in **portable mode** (as with BareTail, to run from a USB stick).
+- `config.toml` in the data folder chosen as described in section 3.2: next to
+  the executable in portable mode (the default for the `.zip`), otherwise the
+  platform config directory (`directories` crate).
 - `profiles/*.toml` for profiles, `themes/*.toml` for themes, and `session.json`
   for restore state.
 - Settings UI edits the same files. Changes are hot-reloaded.
@@ -439,12 +496,15 @@ style = { fg = "warn", bold = true }
 
 ---
 
-## 11. Milestones
+## 12. Milestones
 
 Durations assume one or two developers working part-time. Each milestone ends in a usable release.
 
 ### M0: Foundations (2 weeks)
 - Workspace, CI (Windows/macOS/Linux; fmt, clippy, tests), `cargo-dist` release pipeline.
+- **Portable from day one**: static CRT, embedded assets, data-folder resolution
+  (section 3.2), and a CI job that checks the release binary's size and its
+  dynamic dependencies (`dumpbin /dependents`, `ldd`, `otool -L`) against an allowlist.
 - Big-file fixture generator (`xtask gen-log --size 10G --format nginx`).
 - Criterion benchmark harness, tracked in CI to catch regressions.
 
@@ -454,7 +514,8 @@ Durations assume one or two developers working part-time. Each milestone ends in
 - Encoding detection.
 - egui virtualized text view: scroll, line numbers, wrap, select and copy, tabs,
   status bar, drag and drop, recent files.
-- **Exit criteria:** meets section 2 targets for open, follow and scroll on a 10 GB file.
+- **Exit criteria:** runs from a USB stick on a clean Windows VM (no redistributables,
+  no admin) and over RDP without a GPU; meets section 2 targets for open, follow and scroll on a 10 GB file.
   Usable instead of BareTail every day.
 
 ### M2: Search and filter (4 weeks)
@@ -478,7 +539,7 @@ Durations assume one or two developers working part-time. Each milestone ends in
 
 ### M6: Polish and 1.0 (3 weeks)
 - Command palette, keymaps (including `less` style), themes, settings UI, session restore.
-- Single-instance IPC, stdin input, portable mode, accessibility pass.
+- Single-instance IPC, stdin input, opt-in system integration and its removal, update check, accessibility pass.
 - Signed installers (MSI, notarized DMG, AppImage/Flatpak, deb/rpm), `winget`/Homebrew/Scoop manifests.
 - Documentation site and a sample profile gallery.
 
@@ -486,7 +547,7 @@ Durations assume one or two developers working part-time. Each milestone ends in
 
 ---
 
-## 12. Post-1.0 ideas (ranked)
+## 13. Post-1.0 ideas (ranked)
 1. **Remote sources**: `ssh://host/var/log/app.log` (runs `tail`/`dd` remotely and
    streams back; no agent needed), `docker logs`, `kubectl logs`, systemd journal.
 2. **TUI front end** (`oxtail --tui`) sharing the core crates, for servers without a GUI.
@@ -501,7 +562,7 @@ Durations assume one or two developers working part-time. Each milestone ends in
 
 ---
 
-## 13. Testing and quality strategy
+## 14. Testing and quality strategy
 
 - **Unit and property tests** (`proptest`) for the line index: for random content,
   random chunk boundaries and random append/truncate sequences, the index must
@@ -515,11 +576,16 @@ Durations assume one or two developers working part-time. Each milestone ends in
 - **Benchmarks** in CI with regression thresholds for indexing, search and render
   frame time on generated 1 GB fixtures (larger fixtures run nightly).
 - **UI tests** with `egui_kittest` for key flows (open, search, filter, columns).
+- **Portability checks** on every release candidate: start the portable build on
+  clean VMs (Windows 10/11 without the VC++ redistributable, an old and a new Linux
+  distribution, macOS) and in a GPU-less VM over RDP. Snapshot the registry and
+  filesystem before and after a session, and fail if anything was written outside
+  the data folder.
 - Dogfooding: tail OxTail's own `tracing` log with OxTail.
 
 ---
 
-## 14. Risks and mitigations
+## 15. Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
@@ -527,12 +593,14 @@ Durations assume one or two developers working part-time. Each milestone ends in
 | Timestamp and format auto-detection guesses wrong | Always show what was detected and let the user override in one click; remember the choice per path |
 | Network shares: missing change events, stale sizes | Polling fallback; treat I/O errors as transient with retry and a visible banner |
 | Regex performance traps (huge Unicode classes) | `regex` is linear-time; set size limits; show "slow pattern" hints; prefilter |
-| Scope creep toward a full log platform | Non-goals in section 1; features after M6 go through the ranked list in section 12 |
+| Scope creep toward a full log platform | Non-goals in section 1; features after M6 go through the ranked list in section 13 |
+| A new dependency pulls in a system library or runtime, breaking portability | CI dependency allowlist check (M0); renderer fallback chain; review new crates for `build.rs` linking |
+| macOS App Translocation / quarantine makes the app folder read-only | Notarize; detect translocation and fall back to in-memory settings with a clear banner (section 3.2) |
 | Windows-specific file semantics (share modes, locking, long paths) | Windows CI from day one; `\\?\` long-path handling; tests with a concurrent writer |
 
 ---
 
-## 15. Immediate next steps
+## 16. Immediate next steps
 1. Create the workspace skeleton and CI (M0).
 2. Write the fixture generator and the index property tests **before** the index
    itself.
