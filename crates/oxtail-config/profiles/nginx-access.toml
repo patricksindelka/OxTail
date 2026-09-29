@@ -1,0 +1,41 @@
+# Nginx access log (common / combined format).
+name = "Nginx access"
+match_files = ["*nginx*access*.log", "*nginx*access*.log.*", "access.log"]
+match_content = '^\S+ \S+ \S+ \[\d{1,2}/\w{3}/\d{4}:\d\d:\d\d:\d\d [+-]\d{4}\] "'
+
+[columns]
+parser = "nginx_combined"
+order = ["remote_addr", "time_local", "request", "status", "body_bytes_sent", "*"]
+
+[timestamp]
+column = "time_local"
+format = "apache"
+
+[[rules]]
+name = "HTTP 5xx"
+match = { regex = '" (5\d\d) ' }
+scope = "group:1"
+style = { fg = "error", bold = true }
+priority = 30
+
+[[rules]]
+name = "HTTP 4xx"
+match = { regex = '" (4\d\d) ' }
+scope = "group:1"
+style = { fg = "warn" }
+priority = 20
+
+[[rules]]
+name = "HTTP 2xx/3xx"
+match = { regex = '" ([23]\d\d) ' }
+scope = "group:1"
+style = { fg = "success" }
+priority = 10
+
+[[rules]]
+name = "Health checks"
+match = { regex = '"(GET|HEAD) /(health|healthz|ping|status)[/ ?]' }
+scope = "line"
+style = { fg = "muted" }
+priority = 0
+hide = false

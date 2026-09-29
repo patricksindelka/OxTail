@@ -1,0 +1,25 @@
+# IIS / W3C extended log format (columns come from the #Fields: directive).
+name = "IIS W3C"
+match_files = ["u_ex*.log", "*iis*.log", "W3SVC*.log"]
+match_content = '^#(Software|Version|Fields):'
+
+[columns]
+parser = "w3c"
+order = ["date", "time", "*"]
+
+[timestamp]
+format = "auto"
+
+[[rules]]
+name = "Directives"
+match = { regex = '^#' }
+scope = "line"
+style = { fg = "muted" }
+priority = 0
+
+[[rules]]
+name = "HTTP 5xx"
+match = { column = "sc-status", op = "ge", value = "500" }
+scope = "line"
+style = { bg = "error.subtle" }
+priority = 20

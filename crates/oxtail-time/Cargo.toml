@@ -11,5 +11,11 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# `tzdb-bundle-always` embeds the IANA database so named zones work on
+# Windows and on minimal containers without /usr/share/zoneinfo (portability).
+jiff = { workspace = true, features = ["tzdb-bundle-always"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

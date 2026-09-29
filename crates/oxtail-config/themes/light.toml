@@ -1,0 +1,33 @@
+name = "light"
+dark = false
+
+[ui]
+background = "#ffffff"
+foreground = "#1f2328"
+gutter_background = "#f3f4f6"
+gutter_foreground = "#8a9099"
+selection_background = "#b6d7ff"
+current_line_background = "#eef2f7"
+search_match_background = "#fff0a8"
+border = "#d0d5db"
+accent = "#0b6bcb"
+status_bar_background = "#e9ecf0"
+status_bar_foreground = "#3b4048"
+
+[semantic]
+fatal = "#a3001f"
+"fatal.subtle" = "#ffd6dc"
+error = "#c62828"
+"error.subtle" = "#fde3e3"
+warn = "#a35a00"
+"warn.subtle" = "#fff0d6"
+info = "#1a56c4"
+"info.subtle" = "#e0ebff"
+success = "#2e7d32"
+debug = "#5c6370"
+trace = "#7a808c"
+muted = "#6b7280"
+accent1 = "#0b6bcb"
+accent2 = "#7b3fbf"
+accent3 = "#007c91"
+accent4 = "#c25100"

@@ -1,0 +1,33 @@
+name = "high-contrast"
+dark = true
+
+[ui]
+background = "#000000"
+foreground = "#ffffff"
+gutter_background = "#000000"
+gutter_foreground = "#c0c0c0"
+selection_background = "#0000ff"
+current_line_background = "#1a1a1a"
+search_match_background = "#ffff00"
+border = "#ffffff"
+accent = "#00ffff"
+status_bar_background = "#000000"
+status_bar_foreground = "#ffffff"
+
+[semantic]
+fatal = "#ff00ff"
+"fatal.subtle" = "#4d004d"
+error = "#ff5555"
+"error.subtle" = "#550000"
+warn = "#ffff00"
+"warn.subtle" = "#4d4d00"
+info = "#55aaff"
+"info.subtle" = "#002b55"
+success = "#00ff00"
+debug = "#c0c0c0"
+trace = "#a0a0a0"
+muted = "#b0b0b0"
+accent1 = "#00ffff"
+accent2 = "#ff88ff"
+accent3 = "#88ff88"
+accent4 = "#ffaa00"

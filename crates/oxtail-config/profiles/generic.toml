@@ -1,0 +1,41 @@
+# Fallback for any text log: log levels. Never auto-selected; the application
+# uses it by name when nothing else matches.
+name = "Generic"
+
+[timestamp]
+format = "auto"
+
+[[rules]]
+name = "FATAL / CRITICAL"
+match = { regex = '\b(FATAL|CRITICAL|PANIC)\b' }
+scope = "match"
+style = { fg = "fatal", bold = true }
+priority = 50
+
+[[rules]]
+name = "ERROR"
+match = { regex = '\b(ERROR|ERR|SEVERE|Exception)\b' }
+scope = "match"
+style = { fg = "error", bold = true }
+priority = 40
+
+[[rules]]
+name = "WARN"
+match = { regex = '\b(WARN|WARNING)\b' }
+scope = "match"
+style = { fg = "warn", bold = true }
+priority = 30
+
+[[rules]]
+name = "INFO"
+match = { regex = '\bINFO\b' }
+scope = "match"
+style = { fg = "info" }
+priority = 20
+
+[[rules]]
+name = "DEBUG / TRACE"
+match = { regex = '\b(DEBUG|TRACE)\b' }
+scope = "match"
+style = { fg = "muted" }
+priority = 10

@@ -1,0 +1,42 @@
+# log4j / logback / Python logging style: "2026-09-29 10:01:02,123 LEVEL ...".
+name = "Java / log4j"
+match_files = ["*log4j*", "catalina*.out", "catalina*.log", "server.log", "application.log", "spring*.log"]
+match_content = '^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d[,.]\d+\s+\[?(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\b'
+
+[columns]
+parser = "regex"
+pattern = '^(?P<time>\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d[,.]\d+)\s+\[?(?P<level>TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\]?\s+(?P<message>.*)$'
+order = ["time", "level", "message"]
+multiline = "continuation"
+
+[timestamp]
+column = "time"
+format = "iso8601"
+
+[[rules]]
+name = "FATAL"
+match = { regex = '\bFATAL\b' }
+scope = "line"
+style = { fg = "fatal", bg = "fatal.subtle", bold = true }
+priority = 50
+
+[[rules]]
+name = "ERROR"
+match = { regex = '\bERROR\b' }
+scope = "line"
+style = { fg = "error", bg = "error.subtle" }
+priority = 40
+
+[[rules]]
+name = "WARN"
+match = { regex = '\bWARN(ING)?\b' }
+scope = "match"
+style = { fg = "warn", bold = true }
+priority = 30
+
+[[rules]]
+name = "Stack trace"
+match = { regex = '^\s+at [\w$.]+\(.*\)$|^Caused by: ' }
+scope = "line"
+style = { fg = "muted" }
+priority = 10
