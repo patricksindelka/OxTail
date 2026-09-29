@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use egui::{Context, Event, ViewportCommand};
+use egui::{Context, ViewportCommand};
 use oxtail_config::{
     ConfigChanged, ConfigKind, ConfigWatcher, DataDir, PathMapper, Profile, ProfileSet, Session,
     Settings, ThemeSet, WindowGeometry,
@@ -21,10 +21,9 @@ use oxtail_core::{Document, EncodingChoice, OpenOptions, TextEncoding};
 use crate::alerts::{AlertEvent, AlertJob, AlertWorker, DesktopNotifier};
 use crate::colors::{Colors, select_theme};
 use crate::docview::{BookmarkInfo, DocView, ViewInit};
-use crate::find::{Dir, push_history};
 use crate::gototime::{GotoJob, GotoMsg, GotoTimeDialog, parse_goto_time};
 use crate::guistate::GuiState;
-use crate::keymap::{self, Action};
+use crate::keymap::KeyMap;
 use crate::panes::{PaneId, PaneTree};
 use crate::persist::{Job, Persist, PersistResult};
 use crate::request::OpenRequest;
@@ -59,6 +58,8 @@ pub enum AppMsg {
     DialogDone,
     /// The config watcher is running.
     Watcher(ConfigWatcher, Receiver<ConfigChanged>),
+    /// Which recent files still exist (checked off the UI thread).
+    RecentStatus(Vec<(PathBuf, bool)>),
     /// The files of a merged tab were opened (or opening failed).
     MergeOpened {
         /// The tab that asked for it.
@@ -162,6 +163,17 @@ pub struct OxTailApp {
     pub(crate) file_dialog_requested: bool,
     pub(crate) window: Option<WindowGeometry>,
     pub(crate) file_dialog_open: bool,
+    /// The active key bindings (preset plus the user's overrides).
+    pub(crate) keymap: KeyMap,
+    /// The command palette.
+    pub(crate) palette: crate::palette::PaletteState,
+    /// The settings window's own state (section, key recorder).
+    pub(crate) settings_ui: crate::settingsui::SettingsUi,
+    /// System integration and the update check.
+    pub(crate) sys: crate::sysint::SysState,
+    /// Which recent files exist, as far as the last check knows.
+    pub(crate) recent_exists: HashMap<PathBuf, bool>,
+    recent_checked: Vec<PathBuf>,
     started: bool,
 }
 
@@ -254,8 +266,15 @@ impl OxTailApp {
             file_dialog_requested: false,
             window: startup.session.window,
             file_dialog_open: false,
+            keymap: KeyMap::default(),
+            palette: crate::palette::PaletteState::default(),
+            settings_ui: crate::settingsui::SettingsUi::default(),
+            sys: crate::sysint::SysState::default(),
+            recent_exists: HashMap::new(),
+            recent_checked: Vec::new(),
             started: false,
         };
+        app.rebuild_keymap();
         app.plan_restore(&startup.session);
         if !request.is_empty() {
             app.queue.push_back(request);
@@ -284,6 +303,9 @@ impl OxTailApp {
         self.alerts = Some(AlertWorker::spawn(wake, Arc::new(DesktopNotifier)));
         self.start_config_watcher();
         self.apply_theme(ctx);
+        let wake = self.waker();
+        self.sys
+            .auto_check(self.settings.update_check, &self.data_dir, wake);
         // Restored tabs first, then what was asked for on the command line.
         let restore = std::mem::take(&mut self.restore);
         for r in restore {
@@ -638,6 +660,108 @@ impl OxTailApp {
         }
     }
 
+    /// Opens the folder dialog on a worker thread; the files directly inside
+    /// the chosen folder open as tabs (see [`expand_dropped`]).
+    pub fn pick_folder(&mut self) {
+        if self.file_dialog_open {
+            return;
+        }
+        self.file_dialog_open = true;
+        let tx = self.msg_tx.clone();
+        let wake = self.waker();
+        let start_dir = self
+            .session
+            .recent_files
+            .first()
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf);
+        let spawned = std::thread::Builder::new()
+            .name("oxtail-folder-dialog".into())
+            .spawn(move || {
+                let mut dialog = rfd::AsyncFileDialog::new().set_title("Open folder");
+                if let Some(d) = start_dir {
+                    dialog = dialog.set_directory(d);
+                }
+                if let Some(h) = pollster::block_on(dialog.pick_folder()) {
+                    let files = expand_dropped(&[h.path().to_path_buf()]);
+                    if !files.is_empty() {
+                        let _ = tx.send(AppMsg::Files(files));
+                    }
+                }
+                let _ = tx.send(AppMsg::DialogDone);
+                wake();
+            });
+        if spawned.is_err() {
+            self.file_dialog_open = false;
+        }
+    }
+
+    /// Opens `text` (for example from the clipboard) as a new tab named
+    /// `title`. The document is built on a worker thread.
+    pub fn open_text_tab(&mut self, title: &str, text: String) {
+        let id = self.next_id();
+        let init = TabInit {
+            follow: false,
+            initial_line: Some(0),
+            wrap: self.settings.wrap,
+            ..TabInit::default()
+        };
+        let mut tab = Tab::opening(id, title.to_string(), None, init);
+        tab.pane = self.focused_pane;
+        self.tabs.push(tab);
+        self.select_tab(self.tabs.len() - 1);
+        let tx = self.msg_tx.clone();
+        let wake = self.waker();
+        let name = title.to_string();
+        let spawned = std::thread::Builder::new()
+            .name("oxtail-open-text".into())
+            .spawn(move || {
+                let doc = Document::from_source(
+                    Arc::new(oxtail_core::MemSource::new(text.into_bytes())),
+                    name,
+                );
+                let doc = Arc::new(doc);
+                let w = Arc::clone(&wake);
+                doc.set_waker(Box::new(move || w()));
+                let _ = tx.send(AppMsg::Opened {
+                    tab_id: id,
+                    result: Ok(doc),
+                });
+                wake();
+            });
+        if let Err(e) = spawned {
+            self.finish_open(id, Err(format!("cannot start a thread: {e}")));
+        }
+    }
+
+    /// Checks (on a worker) which recent files still exist, when the list
+    /// changed. The start screen and the "Open recent" menu dim the missing.
+    pub(crate) fn refresh_recent_status(&mut self) {
+        if self.recent_checked == self.session.recent_files {
+            return;
+        }
+        self.recent_checked.clone_from(&self.session.recent_files);
+        let files = self.session.recent_files.clone();
+        let tx = self.msg_tx.clone();
+        let wake = self.waker();
+        let spawned = std::thread::Builder::new()
+            .name("oxtail-recent-check".into())
+            .spawn(move || {
+                let status: Vec<(PathBuf, bool)> = files
+                    .into_iter()
+                    .map(|p| {
+                        let ok = std::fs::metadata(&p).is_ok();
+                        (p, ok)
+                    })
+                    .collect();
+                let _ = tx.send(AppMsg::RecentStatus(status));
+                wake();
+            });
+        if let Err(e) = spawned {
+            tracing::warn!("cannot start the recent files check: {e}");
+        }
+    }
+
     // ----------------------------------------------------------------- tabs
 
     /// Makes tab `i` the active one (and its pane the focused one).
@@ -749,6 +873,8 @@ impl OxTailApp {
         let now = Instant::now();
         self.drain_messages(ctx);
         self.drain_persist(ctx);
+        self.poll_system(ctx);
+        self.refresh_recent_status();
         self.poll_goto_time(ctx);
         if self.windows.cross.poll() {
             ctx.request_repaint();
@@ -780,6 +906,9 @@ impl OxTailApp {
                     });
                 }
                 AppMsg::DialogDone => self.file_dialog_open = false,
+                AppMsg::RecentStatus(list) => {
+                    self.recent_exists = list.into_iter().collect();
+                }
                 AppMsg::MergeOpened { tab_id, result } => self.finish_merge_open(tab_id, result),
                 AppMsg::Watcher(w, rx) => {
                     self._config_watcher = Some(w);
@@ -808,7 +937,12 @@ impl OxTailApp {
                         self.notify_warnings(vec![w]);
                     }
                     if *s != self.settings {
+                        let keys_changed = s.keymap != self.settings.keymap
+                            || s.custom_keybindings != self.settings.custom_keybindings;
                         self.settings = *s;
+                        if keys_changed {
+                            self.rebuild_keymap();
+                        }
                         self.apply_theme(ctx);
                         self.bump_style();
                     }
@@ -1150,119 +1284,6 @@ impl OxTailApp {
         ctx.egui_wants_keyboard_input()
     }
 
-    // ------------------------------------------------------------- keyboard
-
-    fn handle_keys(&mut self, ctx: &Context) {
-        let text_focus = self.text_input_active(ctx);
-        let mut actions: Vec<Action> = Vec::new();
-        ctx.input(|i| {
-            for ev in &i.events {
-                match ev {
-                    Event::Key {
-                        key,
-                        pressed: true,
-                        modifiers,
-                        repeat,
-                        ..
-                    } => {
-                        if let Some(a) = keymap::map(*key, *modifiers) {
-                            let repeatable = matches!(
-                                a,
-                                Action::LineUp
-                                    | Action::LineDown
-                                    | Action::PageUp
-                                    | Action::PageDown
-                                    | Action::ScrollLeft
-                                    | Action::ScrollRight
-                                    | Action::FindNext
-                                    | Action::FindPrev
-                            );
-                            if (*repeat && !repeatable) || (text_focus && !a.works_in_text_fields())
-                            {
-                                continue;
-                            }
-                            actions.push(a);
-                        }
-                    }
-                    Event::Copy if !text_focus => actions.push(Action::Copy),
-                    _ => {}
-                }
-            }
-        });
-        for a in actions {
-            self.perform(a, ctx);
-        }
-    }
-
-    /// Carries out a keyboard or menu action.
-    pub fn perform(&mut self, action: Action, ctx: &Context) {
-        match action {
-            Action::Open => self.pick_files(),
-            Action::CloseTab => self.close_tab(self.active),
-            Action::NextTab => self.cycle_tab(1),
-            Action::PrevTab => self.cycle_tab(-1),
-            Action::ZoomIn => self.set_font_size(self.settings.font_size + 1.0),
-            Action::ZoomOut => self.set_font_size(self.settings.font_size - 1.0),
-            Action::ZoomReset => self.set_font_size(Settings::default().font_size),
-            Action::GotoLine => {
-                if self.active_view().is_some() {
-                    self.windows.goto = Some(GotoDialog {
-                        focus: true,
-                        ..GotoDialog::default()
-                    });
-                }
-            }
-            Action::GotoTime => {
-                if self.active_view().is_some() {
-                    self.windows.goto_time = Some(GotoTimeDialog {
-                        focus: true,
-                        ..GotoTimeDialog::default()
-                    });
-                }
-            }
-            Action::FindInTabs => {
-                self.windows.cross.open = true;
-                self.windows.cross.focus = true;
-            }
-            Action::Escape => self.escape(),
-            Action::ToggleWrap => {
-                let wrap = !self.active_view().is_some_and(|v| v.wrap);
-                self.set_wrap(wrap);
-            }
-            other => self.perform_on_view(other, ctx),
-        }
-    }
-
-    fn escape(&mut self) {
-        if self.windows.goto.take().is_some() {
-            return;
-        }
-        // Dropping the dialog cancels a running search.
-        if self.windows.goto_time.take().is_some() {
-            return;
-        }
-        if self.rule_editor.open {
-            self.rule_editor.open = false;
-            return;
-        }
-        if let Some(m) = self.tabs.get_mut(self.active).and_then(Tab::merged_mut)
-            && m.find.open
-        {
-            m.find.open = false;
-            return;
-        }
-        if let Some(v) = self.active_view_mut() {
-            if v.editing_bookmark.take().is_some() {
-                return;
-            }
-            if v.find.open {
-                v.find.open = false;
-            } else if v.selection.is_some() {
-                v.clear_selection();
-            }
-        }
-    }
-
     /// Sets the time zone used to read and show timestamps and schedules
     /// saving the settings.
     pub fn set_timezone(&mut self, tz: oxtail_config::TimezoneSetting) {
@@ -1284,89 +1305,18 @@ impl OxTailApp {
 
     /// Sets wrapping for the active tab and remembers it as the default.
     pub fn set_wrap(&mut self, wrap: bool) {
-        if let Some(v) = self.active_view_mut() {
+        self.set_wrap_in_tab(self.active, wrap);
+    }
+
+    /// Sets wrapping for tab `index` (the status bar chip of any pane) and
+    /// remembers it as the default; the one place wrapping changes.
+    pub fn set_wrap_in_tab(&mut self, index: usize, wrap: bool) {
+        if let Some(v) = self.tabs.get_mut(index).and_then(Tab::view_mut) {
             v.wrap = wrap;
             v.galleys.borrow_mut().clear();
         }
         self.settings.wrap = wrap;
         self.mark_settings_dirty();
-    }
-
-    fn perform_on_view(&mut self, action: Action, ctx: &Context) {
-        if self
-            .tabs
-            .get(self.active)
-            .is_some_and(|t| t.merged().is_some())
-        {
-            self.perform_on_merged(action, ctx);
-            return;
-        }
-        let now = Instant::now();
-        let Some(view) = self.tabs.get_mut(self.active).and_then(Tab::view_mut) else {
-            return;
-        };
-        match action {
-            Action::Find => {
-                view.find.open = true;
-                view.find.focus = true;
-            }
-            Action::FindNext | Action::FindPrev => {
-                if view.find.text.is_empty() {
-                    view.find.open = true;
-                    view.find.focus = true;
-                } else {
-                    // Matches are only painted while the bar is open.
-                    view.find.open = true;
-                    let dir = if action == Action::FindNext {
-                        Dir::Next
-                    } else {
-                        Dir::Prev
-                    };
-                    if !view.find.is_running() {
-                        view.find.restart_now(now);
-                    }
-                    view.find.step(dir, view.pos.top);
-                    let text = view.find.text.clone();
-                    push_history(&mut self.history, &text);
-                    self.history_dirty = true;
-                }
-            }
-            Action::Filter => {
-                view.filter.open = !view.filter.open;
-                if view.filter.open && view.filter.entries.is_empty() {
-                    view.filter
-                        .entries
-                        .push(crate::filter::FilterEntry::default());
-                }
-                if view.filter.open {
-                    view.filter.focus_last = true;
-                }
-            }
-            Action::ToggleBookmark => view.toggle_bookmark(),
-            Action::NextBookmark => view.goto_bookmark(Dir::Next),
-            Action::PrevBookmark => view.goto_bookmark(Dir::Prev),
-            Action::Mark => view.add_mark(),
-            Action::Copy => view.copy_selection(false),
-            Action::CopyWithNumbers => view.copy_selection(true),
-            Action::SelectAll => view.select_all(),
-            Action::ToggleFollow => view.toggle_follow(),
-            Action::ScrollTop => view.jump_top(),
-            Action::ScrollBottom => view.resume_follow(),
-            Action::PageUp => view.page(false),
-            Action::PageDown => view.page(true),
-            Action::LineUp => {
-                let h = view.metrics.row_h;
-                view.scroll_px(-h);
-            }
-            Action::LineDown => {
-                let h = view.metrics.row_h;
-                view.scroll_px(h);
-            }
-            Action::ScrollLeft => view.h_scroll = (view.h_scroll - 40.0).max(0.0),
-            Action::ScrollRight => view.h_scroll += 40.0,
-            _ => {}
-        }
-        ctx.request_repaint();
     }
 
     /// Whether the go-to-time dialog is open.

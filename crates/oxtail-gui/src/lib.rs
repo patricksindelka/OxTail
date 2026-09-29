@@ -20,6 +20,7 @@
 //! | [`find`], [`filter`], [`minimap`], [`goto`] | Search, filter views, minimap binning, go to line |
 //! | [`highlight`], [`rules`], [`ruleeditor`] | Highlight state, profile rule adapter, the rule editor |
 //! | [`alerts`], [`persist`] | Notification worker, configuration I/O worker |
+//! | [`actions`], [`palette`], [`settingsui`], [`sysint`], [`welcome`] | Every command as an action, the command palette, the settings window, system integration and update check, the start screen |
 //! | [`keymap`], [`panels`], [`request`], [`startup`], [`icon`], [`util`] | Shortcuts, bars, open requests, startup data, window icon, formatting |
 //! | [`structure`], [`colspec`], [`chooser`], [`guistate`] | Which parser a tab uses (profile, detection, choice), profile table adapters, the parser chooser, remembered choices |
 //! | [`collayout`], [`table`], [`tablepaint`], [`colui`], [`detail`] | The column table: layout maths, header, cells, suggestion bar and windows, the detail pane |
@@ -52,6 +53,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod actions;
 pub mod alerts;
 pub mod app;
 pub mod appmerge;
@@ -82,6 +84,7 @@ pub mod mergefilter;
 pub mod mergepaint;
 pub mod mergeview;
 pub mod minimap;
+pub mod palette;
 pub mod panels;
 pub mod panes;
 pub mod panesui;
@@ -91,10 +94,12 @@ pub mod request;
 pub mod ruleeditor;
 pub mod rules;
 pub mod scroll;
+pub mod settingsui;
 pub mod sort;
 pub mod startup;
 pub mod stats;
 pub mod structure;
+pub mod sysint;
 pub mod tab;
 pub mod table;
 pub mod tablepaint;
@@ -102,6 +107,7 @@ pub mod text;
 pub mod timeview;
 pub mod util;
 pub mod viewport;
+pub mod welcome;
 
 pub use app::{OxTailApp, native_options};
 pub use request::OpenRequest;

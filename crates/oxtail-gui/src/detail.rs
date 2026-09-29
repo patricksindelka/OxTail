@@ -3,6 +3,7 @@
 //! `oxtail_columns::Record`, so they are unit-tested without a UI.
 
 use oxtail_columns::{ColumnKind, Record, Schema, export_csv, export_jsonl};
+use oxtail_highlight::{ColorRef, SemanticColor, Style};
 use serde_json::{Map, Value};
 
 /// One row of the detail list.
@@ -61,6 +62,64 @@ pub fn detail_fields(schema: &Schema, rec: &Record<'_>) -> Vec<DetailField> {
         });
     }
     out
+}
+
+/// How a detail value is tinted: the same idea as the table, where level
+/// cells take the severity colour and timestamps are muted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// The default text colour.
+    Plain,
+    /// De-emphasised (timestamps).
+    Muted,
+    /// A severity colour; `strong` is bold (warnings and worse).
+    Level {
+        /// The semantic colour.
+        color: SemanticColor,
+        /// Draw bold.
+        strong: bool,
+    },
+}
+
+/// The severity colour of a level value (`ERROR`, `warn`, `Information`...),
+/// with the same words as the built-in profiles. `None` for anything else.
+pub fn level_tone(value: &str) -> Option<Tone> {
+    let v = value.trim().trim_matches('"').to_ascii_lowercase();
+    let (color, strong) = match v.as_str() {
+        "fatal" | "critical" | "crit" | "panic" | "emerg" | "emergency" | "alert" | "f" => {
+            (SemanticColor::Error, true)
+        }
+        "error" | "err" | "severe" | "e" => (SemanticColor::Error, true),
+        "warn" | "warning" | "w" => (SemanticColor::Warn, true),
+        "info" | "information" | "notice" | "i" => (SemanticColor::Info, false),
+        "debug" | "dbg" | "d" => (SemanticColor::Debug, false),
+        "trace" | "trc" | "verbose" | "t" => (SemanticColor::Trace, false),
+        _ => return None,
+    };
+    Some(Tone::Level { color, strong })
+}
+
+/// The tone of a detail value of column kind `kind`.
+pub fn tone_for(kind: ColumnKind, value: &str) -> Tone {
+    match kind {
+        ColumnKind::Level => level_tone(value).unwrap_or(Tone::Plain),
+        ColumnKind::Timestamp => Tone::Muted,
+        _ => Tone::Plain,
+    }
+}
+
+/// The style of a tone (`None` for plain text). The table uses it as a base
+/// layer under the rules' own styles, so level and timestamp cells read the
+/// same however the columns were parsed, and a user rule still wins.
+pub fn tone_style(tone: Tone) -> Option<Style> {
+    match tone {
+        Tone::Plain => None,
+        Tone::Muted => Some(Style::fg(ColorRef::solid(SemanticColor::Muted))),
+        Tone::Level { color, strong } => {
+            let s = Style::fg(ColorRef::solid(color));
+            Some(if strong { s.bold() } else { s })
+        }
+    }
 }
 
 /// The record as one pretty-printed JSON object: schema columns (typed like
@@ -157,6 +216,45 @@ mod tests {
         let mut lines = csv.lines();
         assert_eq!(lines.next(), Some("a,b"));
         assert_eq!(lines.next(), Some("1,\"x, \"\"y\"\"\""));
+    }
+
+    #[test]
+    fn levels_get_severity_tones_and_timestamps_are_muted() {
+        let tone = |v: &str| level_tone(v);
+        assert_eq!(
+            tone("WARNING"),
+            Some(Tone::Level {
+                color: SemanticColor::Warn,
+                strong: true
+            })
+        );
+        assert_eq!(
+            tone("\"err\""),
+            Some(Tone::Level {
+                color: SemanticColor::Error,
+                strong: true
+            })
+        );
+        assert_eq!(
+            tone("info"),
+            Some(Tone::Level {
+                color: SemanticColor::Info,
+                strong: false
+            })
+        );
+        assert_eq!(tone("chatty"), None);
+        assert_eq!(tone_for(ColumnKind::Timestamp, "2026-01-01"), Tone::Muted);
+        assert_eq!(tone_for(ColumnKind::Level, "chatty"), Tone::Plain);
+        assert_eq!(tone_for(ColumnKind::Text, "error"), Tone::Plain);
+        assert_eq!(tone_style(Tone::Plain), None);
+        assert!(tone_style(Tone::Muted).is_some());
+        assert!(matches!(
+            tone_for(ColumnKind::Level, "DEBUG"),
+            Tone::Level {
+                color: SemanticColor::Debug,
+                ..
+            }
+        ));
     }
 
     #[test]

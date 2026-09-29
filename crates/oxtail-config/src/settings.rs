@@ -139,6 +139,9 @@ pub struct Settings {
     /// offered up to this size (PLAN.md section 8.3). Absent in old files: the
     /// default applies.
     pub sort_max_rows: u64,
+    /// Show the minimap (match and rule-hit overview) next to the scrollbar.
+    /// Absent in old files: on.
+    pub show_minimap: bool,
 }
 
 impl Default for Settings {
@@ -165,6 +168,7 @@ impl Default for Settings {
             renderer: Renderer::Auto,
             recent_files_limit: 20,
             sort_max_rows: 1_000_000,
+            show_minimap: true,
         }
     }
 }
@@ -459,5 +463,26 @@ mod tests {
         fs::write(&p, [0xff, 0xfe, 0x00, b'=']).expect("write");
         let (s, w) = Settings::load(&p, &DataMode::Portable);
         assert!(w.is_some() && !s.wrap);
+    }
+
+    #[test]
+    fn the_minimap_is_on_by_default_and_old_files_load() {
+        assert!(Settings::default().show_minimap);
+        let (s, w) = Settings::from_toml_str("font_size = 14.0\n", &DataMode::Portable);
+        assert!(w.is_none());
+        assert!(s.show_minimap);
+        let (s, _) = Settings::from_toml_str("show_minimap = false\n", &DataMode::Portable);
+        assert!(!s.show_minimap);
+        let round = Settings::from_toml_str(
+            &Settings {
+                show_minimap: false,
+                ..Settings::default()
+            }
+            .to_toml_string()
+            .unwrap(),
+            &DataMode::Portable,
+        )
+        .0;
+        assert!(!round.show_minimap);
     }
 }

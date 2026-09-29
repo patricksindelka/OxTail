@@ -12,6 +12,7 @@ use oxtail_search::Matcher;
 
 use crate::collayout::Placement;
 use crate::colors::Colors;
+use crate::detail::{tone_for, tone_style};
 use crate::docview::DocView;
 use crate::highlight::Prepared;
 use crate::table::{
@@ -115,6 +116,7 @@ fn cell_galley(
     prepared: &Prepared,
     rec: &oxtail_columns::Record<'_>,
     col: usize,
+    kind: ColumnKind,
     display: &str,
     key: CellKey,
     matcher: Option<&Arc<Matcher>>,
@@ -139,6 +141,10 @@ fn cell_galley(
         ),
     };
     let layer = whole(line_style, display.len());
+    // Level and timestamp cells take their severity/muted colour from the
+    // column kind, below the rules' own styles (rules cannot always reach a
+    // cell: JSON values have no place in the raw line).
+    let tone = whole(tone_style(tone_for(kind, display)), display.len());
     let search = match matcher {
         Some(m) => clean_ranges(display, m.find_iter(display.as_bytes())),
         None => Vec::new(),
@@ -150,7 +156,7 @@ fn cell_galley(
         row_h,
         &CellText {
             text: display,
-            layers: &[&layer, &ansi_sub, &hl_sub],
+            layers: &[&layer, &tone, &ansi_sub, &hl_sub],
             search: &search,
             current: key.current,
             dimmed: key.dimmed,
@@ -203,6 +209,7 @@ pub fn wrapped_row_height(
                         prepared,
                         rec,
                         spec.fill,
+                        ColumnKind::Text,
                         display,
                         key,
                         matcher,
@@ -277,6 +284,11 @@ pub fn paint_table_row(r: &TableRow<'_>, cache: &mut TableCache, painter: &egui:
         if visible.width() <= 1.0 {
             continue;
         }
+        let kind = parser
+            .schema()
+            .columns
+            .get(p.col)
+            .map_or(ColumnKind::Text, |c| c.kind);
         let wrapped = r.wrap.filter(|w| w.fill == p.col && w.fill_is_text);
         let display_of = || st.cell_text(p.col, rec);
         let galley = match wrapped {
@@ -297,6 +309,7 @@ pub fn paint_table_row(r: &TableRow<'_>, cache: &mut TableCache, painter: &egui:
                             prepared,
                             rec,
                             p.col,
+                            kind,
                             &display,
                             r.key,
                             r.matcher,
@@ -315,19 +328,14 @@ pub fn paint_table_row(r: &TableRow<'_>, cache: &mut TableCache, painter: &egui:
                         continue;
                     }
                     let g = cell_galley(
-                        r.ctx, r.colors, r.font, r.row_h, prepared, rec, p.col, &display, r.key,
-                        r.matcher, None,
+                        r.ctx, r.colors, r.font, r.row_h, prepared, rec, p.col, kind, &display,
+                        r.key, r.matcher, None,
                     );
                     cache.put(r.line.offset, p.col, r.key, Arc::clone(&g));
                     g
                 }
             },
         };
-        let kind = parser
-            .schema()
-            .columns
-            .get(p.col)
-            .map_or(ColumnKind::Text, |c| c.kind);
         let gw = galley.size().x;
         let x = if right_aligned(kind) && gw + 2.0 * CELL_PAD <= p.w {
             x0 + p.w - CELL_PAD - gw
@@ -356,6 +364,133 @@ fn whole(style: Option<Style>, len: usize) -> Vec<StyledSpan> {
 mod tests {
     use super::*;
     use oxtail_highlight::{ColorRef, SemanticColor};
+
+    /// The colour the first section of the laid-out galley has.
+    fn galley_color(
+        colors: &Colors,
+        kind: ColumnKind,
+        text: &str,
+        rule_style: Option<Style>,
+    ) -> egui::Color32 {
+        use crate::highlight::HighlightState;
+        use oxtail_columns::ParserSpec;
+        // A rule's style can only reach a cell that has a place in the raw
+        // line (logfmt); JSON values have none, which is what the kind is for.
+        let (spec, line) = if rule_style.is_some() {
+            (
+                ParserSpec::Logfmt {
+                    columns: vec!["level".into()],
+                    kinds: Default::default(),
+                },
+                format!("level={text}"),
+            )
+        } else {
+            (
+                ParserSpec::JsonLines {
+                    columns: vec!["level".into()],
+                    kinds: Default::default(),
+                },
+                format!("{{\"level\":\"{text}\"}}"),
+            )
+        };
+        let parser = spec.compile().unwrap();
+        let mut hl = HighlightState::with_defaults();
+        hl.set_rules(Vec::new(), None);
+        hl.set_parser(Some(Arc::new(parser)));
+        let l = Line {
+            number: 0,
+            number_exact: true,
+            offset: 0,
+            len: line.len() as u64 + 1,
+            text: line,
+            truncated: false,
+        };
+        let mut prepared = (*hl.prepare(&l)).clone();
+        let rec = prepared.record.clone().expect("a record");
+        if let Some(style) = rule_style {
+            prepared.hl.spans = vec![StyledSpan {
+                range: rec.span(0).expect("a cell in the raw line"),
+                style,
+            }];
+        }
+        let ctx = egui::Context::default();
+        let mut out = egui::Color32::PLACEHOLDER;
+        let key = CellKey {
+            epoch: 0,
+            current: false,
+            dimmed: false,
+            wrap_bits: 0,
+        };
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let ctx = ui.ctx().clone();
+            let g = cell_galley(
+                &ctx,
+                colors,
+                &FontId::monospace(13.0),
+                16.0,
+                &prepared,
+                &rec,
+                0,
+                kind,
+                text,
+                key,
+                None,
+                None,
+            );
+            out = g.job.sections[0].format.color;
+        });
+        out
+    }
+
+    #[test]
+    fn level_cells_take_the_severity_colour_from_their_kind() {
+        use oxtail_highlight::{ColorRef, SemanticColor};
+        let themes = oxtail_config::ThemeSet::builtin();
+        for theme in themes.themes() {
+            let colors = Colors::from_theme(theme);
+            // JSON values have no place in the raw line, so no rule reaches
+            // them: the column kind colours them, exactly as a rule with the
+            // same style would.
+            for (word, sem, bold) in [
+                ("ERROR", SemanticColor::Error, true),
+                ("warn", SemanticColor::Warn, true),
+                ("Info", SemanticColor::Info, false),
+                ("debug", SemanticColor::Debug, false),
+                ("trace", SemanticColor::Trace, false),
+            ] {
+                let style = Style::fg(ColorRef::solid(sem));
+                let style = if bold { style.bold() } else { style };
+                let expected = galley_color(&colors, ColumnKind::Text, word, Some(style));
+                assert_ne!(expected, colors.text);
+                assert_eq!(
+                    galley_color(&colors, ColumnKind::Level, word, None),
+                    expected,
+                    "{} {word}",
+                    colors.name
+                );
+            }
+            // Other kinds and unknown words stay plain.
+            assert_eq!(
+                galley_color(&colors, ColumnKind::Text, "ERROR", None),
+                colors.text
+            );
+            assert_eq!(
+                galley_color(&colors, ColumnKind::Level, "chatty", None),
+                colors.text
+            );
+            // A rule's own colour wins over the kind's.
+            let mine = Style::fg(ColorRef::solid(SemanticColor::Accent2));
+            assert_eq!(
+                galley_color(&colors, ColumnKind::Level, "ERROR", Some(mine)),
+                // (the kind's bold stays; the colour is the rule's)
+                galley_color(&colors, ColumnKind::Text, "ERROR", Some(mine.bold()))
+            );
+            assert_ne!(
+                galley_color(&colors, ColumnKind::Level, "ERROR", Some(mine)),
+                galley_color(&colors, ColumnKind::Level, "ERROR", None)
+            );
+        }
+    }
 
     #[test]
     fn a_whole_span_covers_the_text() {

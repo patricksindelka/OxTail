@@ -10,7 +10,7 @@ use oxtail_highlight::{ColorRef, SemanticColor};
 
 use crate::chooser::{CustomKind, DELIMITERS, build_spec};
 use crate::colors::Colors;
-use crate::detail::{detail_fields, record_csv, record_json};
+use crate::detail::{Tone, detail_fields, record_csv, record_json, tone_for};
 use crate::docview::DocView;
 use crate::export::{ExportFormat, ExportMsg};
 use crate::filter::FilterEntry;
@@ -35,15 +35,57 @@ fn error_color(colors: &Colors) -> Color32 {
     colors.resolve(&ColorRef::solid(SemanticColor::Error))
 }
 
-/// The text of the suggestion bar.
-pub fn suggestion_text(s: &crate::structure::Suggestion) -> String {
-    match &s.profile {
-        Some(p) => format!(
-            "Profile \u{201c}{p}\u{201d} defines columns ({}). Show as columns?",
-            s.name
-        ),
-        None => format!("Looks like {}. Show as columns?", s.name),
+/// Most column names listed in the suggestion bar.
+const SUGGESTION_COLUMNS: usize = 7;
+
+/// The question the suggestion bar asks.
+pub const SUGGESTION_QUESTION: &str = "Show as columns?";
+
+/// The column names to list for `s`: the preferred order first (names the
+/// parser does not have are skipped), then the rest of `schema`.
+pub fn suggestion_columns(s: &crate::structure::Suggestion, schema: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in &s.order {
+        if let Some(found) = schema.iter().find(|c| c.eq_ignore_ascii_case(name))
+            && !out.contains(found)
+        {
+            out.push(found.clone());
+        }
     }
+    for c in schema {
+        if !out.contains(c) {
+            out.push(c.clone());
+        }
+    }
+    out
+}
+
+/// The detail line of the suggestion bar: what the format is and the columns
+/// it would show, e.g. `Java / log4j: time · level · thread · logger · message`.
+pub fn suggestion_detail(s: &crate::structure::Suggestion, columns: &[String]) -> String {
+    // A profile's own name is the best name; otherwise the detected format.
+    let name = s.profile.as_deref().unwrap_or(&s.name);
+    if columns.is_empty() {
+        return name.to_string();
+    }
+    let shown: Vec<&str> = columns
+        .iter()
+        .take(SUGGESTION_COLUMNS)
+        .map(String::as_str)
+        .collect();
+    let mut list = shown.join(" \u{b7} ");
+    if columns.len() > SUGGESTION_COLUMNS {
+        list.push_str(&format!(
+            " \u{b7} +{} more",
+            columns.len() - SUGGESTION_COLUMNS
+        ));
+    }
+    format!("{name}: {list}")
+}
+
+/// The whole text of the suggestion bar (question and detail).
+pub fn suggestion_text(s: &crate::structure::Suggestion, columns: &[String]) -> String {
+    format!("{SUGGESTION_QUESTION} {}", suggestion_detail(s, columns))
 }
 
 /// Draws the "show as columns?" bar.
@@ -51,6 +93,13 @@ pub fn suggestion_bar(ui: &mut Ui, view: &DocView, colors: &Colors) -> Suggestio
     let Some(s) = &view.st.suggestion else {
         return SuggestionAction::None;
     };
+    let schema: Vec<String> = view
+        .st
+        .parser
+        .as_ref()
+        .map(|p| p.schema().columns.iter().map(|c| c.name.clone()).collect())
+        .unwrap_or_default();
+    let columns = suggestion_columns(s, &schema);
     let mut action = SuggestionAction::None;
     let fill = colors.resolve(&ColorRef::subtle(SemanticColor::Info));
     egui::Frame::new()
@@ -58,7 +107,8 @@ pub fn suggestion_bar(ui: &mut Ui, view: &DocView, colors: &Colors) -> Suggestio
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(suggestion_text(s));
+                ui.label(RichText::new(SUGGESTION_QUESTION).strong());
+                ui.label(suggestion_detail(s, &columns));
                 if ui.button("Accept").clicked() {
                     action = SuggestionAction::Accept;
                 }
@@ -185,41 +235,58 @@ pub fn detail_pane(ui: &mut Ui, view: &mut DocView, colors: &Colors) -> Option<S
         return None;
     };
     let selected = view.selected_record();
+    // Computed once per frame and shared by the header and the body.
+    let field_list = selected
+        .as_ref()
+        .and_then(|(_, p)| p.record.as_ref())
+        .map(|r| detail_fields(parser.schema(), r));
+    let field_count = field_list.as_ref().map(Vec::len);
     ui.horizontal(|ui| {
-        ui.strong("Detail");
+        ui.strong("Record detail");
         if let Some((line, _)) = &selected {
             let n = if line.number_exact {
                 (line.number + 1).to_string()
             } else {
                 format!("\u{2248}{}", line.number + 1)
             };
-            ui.label(RichText::new(format!("line {n}")).weak());
+            let what = match field_count {
+                Some(f) => format!("line {n} \u{b7} {f} fields"),
+                None => format!("line {n}"),
+            };
+            ui.label(RichText::new(what).color(colors.gutter_text));
         }
-        let has_record = selected.as_ref().is_some_and(|(_, p)| p.record.is_some());
-        if ui
-            .add_enabled(has_record, egui::Button::new("Copy as JSON"))
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if crate::panels::icon_button(
+                ui,
+                crate::panels::Icon::Close,
+                "Close the detail pane",
+                "Close the detail pane",
+            )
             .clicked()
-            && let Some((_, p)) = &selected
-            && let Some(rec) = &p.record
-        {
-            copy = Some(record_json(parser.schema(), rec));
-        }
-        if ui
-            .add_enabled(has_record, egui::Button::new("Copy as CSV"))
-            .clicked()
-            && let Some((_, p)) = &selected
-            && let Some(rec) = &p.record
-        {
-            copy = Some(record_csv(parser.schema(), rec));
-        }
-        if ui
-            .button("\u{d7}")
-            .on_hover_text("Close the detail pane")
-            .clicked()
-        {
-            view.detail_open = false;
-        }
+            {
+                view.detail_open = false;
+            }
+            let has_record = selected.as_ref().is_some_and(|(_, p)| p.record.is_some());
+            // Right to left: CSV first, so JSON reads first.
+            if ui
+                .add_enabled(has_record, egui::Button::new("Copy as CSV"))
+                .clicked()
+                && let Some((_, p)) = &selected
+                && let Some(rec) = &p.record
+            {
+                copy = Some(record_csv(parser.schema(), rec));
+            }
+            if ui
+                .add_enabled(has_record, egui::Button::new("Copy as JSON"))
+                .clicked()
+                && let Some((_, p)) = &selected
+                && let Some(rec) = &p.record
+            {
+                copy = Some(record_json(parser.schema(), rec));
+            }
+        });
     });
+    ui.separator();
     let Some((line, prepared)) = selected else {
         ui.label(RichText::new("Select a line to see its fields.").weak());
         return copy;
@@ -235,25 +302,58 @@ pub fn detail_pane(ui: &mut Ui, view: &mut DocView, colors: &Colors) -> Option<S
                 ui.label(RichText::new(shorten(&line.text, 4000)).monospace());
             }
             Some(rec) => {
+                let fields = field_list.as_deref().unwrap_or_default();
+                // Keys share one column, right-aligned against their values.
+                let key_font = egui::TextStyle::Body.resolve(ui.style());
+                let key_w = fields
+                    .iter()
+                    .map(|f| {
+                        ui.fonts_mut(|fo| {
+                            fo.layout_no_wrap(f.name.clone(), key_font.clone(), Color32::WHITE)
+                        })
+                        .size()
+                        .x
+                    })
+                    .fold(0.0_f32, f32::max)
+                    .clamp(40.0, 220.0);
                 egui::Grid::new("detail-grid")
                     .num_columns(2)
-                    .spacing([12.0, 3.0])
+                    .spacing([14.0, 4.0])
                     .striped(true)
                     .show(ui, |ui| {
-                        for f in detail_fields(parser.schema(), rec) {
-                            let name = RichText::new(&f.name).strong();
-                            ui.label(if f.extra {
-                                name.color(colors.gutter_text)
+                        for f in fields {
+                            let key = RichText::new(&f.name).color(if f.extra {
+                                colors.gutter_text
                             } else {
-                                name
+                                colors.status_text
                             });
+                            let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+                            ui.add_sized(
+                                egui::vec2(key_w, row_h),
+                                egui::Label::new(key).halign(egui::Align::RIGHT).truncate(),
+                            );
                             let shown = if f.kind == ColumnKind::Timestamp {
                                 view.st
                                     .cell_text(parser.schema().find(&f.name).unwrap_or(0), rec)
                             } else {
                                 f.value.clone()
                             };
-                            ui.label(RichText::new(shown).monospace());
+                            let mut text = RichText::new(shown).monospace();
+                            match tone_for(f.kind, &f.value) {
+                                Tone::Plain => {}
+                                Tone::Muted => {
+                                    text = text.color(
+                                        colors.resolve(&ColorRef::solid(SemanticColor::Muted)),
+                                    );
+                                }
+                                Tone::Level { color, strong } => {
+                                    text = text.color(colors.resolve(&ColorRef::solid(color)));
+                                    if strong {
+                                        text = text.strong();
+                                    }
+                                }
+                            }
+                            ui.label(text);
                             ui.end_row();
                         }
                     });
@@ -544,20 +644,62 @@ mod tests {
     use crate::structure::Suggestion;
     use oxtail_columns::ParserSpec;
 
-    #[test]
-    fn suggestion_text_names_the_format_or_the_profile() {
-        let mut s = Suggestion {
-            name: "Nginx/Apache combined".into(),
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn suggestion(profile: Option<&str>, name: &str, order: &[&str]) -> Suggestion {
+        Suggestion {
+            name: name.into(),
             spec: ParserSpec::AccessCombined,
-            order: Vec::new(),
-            profile: None,
+            order: names(order),
+            profile: profile.map(str::to_string),
             score: 0.9,
-        };
-        assert_eq!(
-            suggestion_text(&s),
-            "Looks like Nginx/Apache combined. Show as columns?"
+        }
+    }
+
+    #[test]
+    fn suggestion_text_reads_naturally() {
+        // A profile: its name, then the columns in the profile's order.
+        let s = suggestion(
+            Some("Java / log4j"),
+            "Java / log4j (Regex)",
+            &["time", "level", "thread", "logger", "message"],
         );
-        s.profile = Some("Nginx".into());
-        assert!(suggestion_text(&s).contains("Nginx"));
+        let schema = names(&["message", "thread", "level", "time", "logger"]);
+        let cols = suggestion_columns(&s, &schema);
+        assert_eq!(
+            suggestion_text(&s, &cols),
+            "Show as columns? Java / log4j: time \u{b7} level \u{b7} thread \u{b7} logger \u{b7} message"
+        );
+        // The parser's name and the profile's are never both spelled out.
+        let t = suggestion_text(&s, &cols);
+        assert!(!t.contains("Regex") && !t.contains("Profile"), "{t}");
+        // Detected format without a profile.
+        let d = suggestion(None, "Nginx/Apache combined", &[]);
+        assert_eq!(
+            suggestion_text(&d, &names(&["remote", "ts", "status"])),
+            "Show as columns? Nginx/Apache combined: remote \u{b7} ts \u{b7} status"
+        );
+        // No known columns (JSON lines with a wildcard): just the name.
+        assert_eq!(
+            suggestion_text(&suggestion(Some("logfmt"), "logfmt (logfmt)", &[]), &[]),
+            "Show as columns? logfmt"
+        );
+    }
+
+    #[test]
+    fn long_column_lists_are_cut_off() {
+        let s = suggestion(None, "CSV", &[]);
+        let many: Vec<String> = (0..10).map(|i| format!("c{i}")).collect();
+        let t = suggestion_detail(&s, &many);
+        assert!(t.ends_with("c6 \u{b7} +3 more"), "{t}");
+    }
+
+    #[test]
+    fn preferred_order_skips_unknown_names() {
+        let s = suggestion(Some("p"), "p", &["ts", "nope", "LEVEL"]);
+        let cols = suggestion_columns(&s, &names(&["level", "msg", "ts"]));
+        assert_eq!(cols, names(&["ts", "level", "msg"]));
     }
 }

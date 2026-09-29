@@ -360,6 +360,27 @@ pub fn draw_header(
                 mix32(colors.gutter_bg, colors.text, 0.08),
             );
         }
+        // For screen readers: a column header with its sort state.
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                true,
+                format!("{} column", info.name),
+            )
+        });
+        crate::panels::a11y_role(&resp, egui::accesskit::Role::ColumnHeader);
+        if let Some(s) = sort.active.filter(|s| s.col == p.col) {
+            ui.ctx().accesskit_node_builder(resp.id, |b| {
+                b.set_description(
+                    if s.descending {
+                        "Sorted descending"
+                    } else {
+                        "Sorted ascending"
+                    }
+                    .to_owned(),
+                );
+            });
+        }
         let label = if p.pinned {
             format!("\u{25cf} {}", info.name)
         } else {
@@ -444,6 +465,13 @@ pub fn draw_header(
         .intersect(clip.expand2(vec2(RESIZE_GRAB, 0.0)));
         if grab.width() > 0.0 {
             let rr = ui.interact(grab, id.with(("resize", p.col)), Sense::click_and_drag());
+            rr.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::ResizeHandle,
+                    true,
+                    format!("Resize the {} column", info.name),
+                )
+            });
             if rr.hovered() || rr.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 painter.vline(

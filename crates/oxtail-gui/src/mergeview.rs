@@ -153,6 +153,8 @@ pub struct MergedView {
     pub h_scroll: f32,
     /// Widest text drawn so far (horizontal scroll range).
     pub max_text_w: f32,
+    /// The "lines are cut off" hint was dismissed.
+    pub cut_hint_dismissed: bool,
     /// Time zone for zone-less timestamps (informational).
     pub time_zone: TimeZone,
     fetcher: Fetcher,
@@ -224,6 +226,7 @@ impl MergedView {
             pending_px: 0.0,
             h_scroll: 0.0,
             max_text_w: 0.0,
+            cut_hint_dismissed: false,
             time_zone,
             fetcher,
             filter_job: None,

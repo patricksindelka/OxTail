@@ -25,6 +25,7 @@ use crate::colors::{Colors, mix32};
 use crate::docview::DocView;
 use crate::highlight::{HighlightState, Prepared};
 use crate::minimap::{bin_matches, bin_of, bin_points, click_fraction, intensity};
+use crate::panels::{a11y_item, a11y_list, a11y_role, a11y_scrollbar, pointer_sense};
 use crate::scroll::{Row, Visible};
 use crate::sort::{MINIMAP_REFRESH, MINIMAP_WORK_CAP, position_bins};
 use crate::table::{CELL_PAD, CellKey, HEADER_EXTRA, HeaderGeometry, SortHeader, draw_header};
@@ -412,6 +413,20 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         id.with("text"),
         Sense::click_and_drag(),
     );
+    text_resp.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Other,
+            true,
+            if table { "Log table" } else { "Log view" },
+        )
+    });
+    a11y_role(&text_resp, egui::accesskit::Role::Group);
+    ui.ctx().accesskit_node_builder(text_resp.id, |b| {
+        b.set_description(
+            "Click, then use the arrow keys, Page Up and Page Down to move through the lines"
+                .to_owned(),
+        );
+    });
     // Over the view (also its scrollbars), and not under a popup or window.
     let hovered = ui.rect_contains_pointer(full);
     let hbar_rect = rect_between(pos2(full.left(), bottom), pos2(text_right, full.bottom()));
@@ -585,6 +600,18 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     let selection = view.selection_test();
     let cursor = view.cursor;
     let mut bookmark_updates: Vec<(u64, u64)> = Vec::new();
+    // The visible rows for screen readers (nothing is built without one).
+    let a11y_rows = a11y_list(
+        ui,
+        id.with("a11y-rows"),
+        text_rect,
+        egui::accesskit::Role::ListBox,
+        if table {
+            "Log rows (table)"
+        } else {
+            "Log lines"
+        },
+    );
     for (row, (prepared, galley)) in vis.rows.iter().zip(&laid) {
         let y = text_rect.top() + row.y;
         let row_rect = rect_between(
@@ -623,18 +650,38 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         }
 
         let selected = selection.contains(row.line.offset);
-        if selected {
-            painter.rect_filled(row_rect, CornerRadius::ZERO, colors.selection_bg);
-            painter.rect_filled(gutter_row, CornerRadius::ZERO, colors.selection_bg);
-        } else if let Some(bg) = prepared
+        if let Some(list) = &a11y_rows {
+            let n = if row.line.number_exact {
+                (row.line.number + 1).to_string()
+            } else {
+                format!("about {}", row.line.number + 1)
+            };
+            a11y_item(
+                list,
+                id.with(("row", row.line.offset)),
+                row_rect,
+                egui::accesskit::Role::ListBoxOption,
+                &crate::util::shorten(&prepared.text, 400),
+                Some(selected),
+                Some(&format!("Line {n}")),
+            );
+        }
+        // The row's own colour first (severity), then the selection as a
+        // translucent tint over it, so an error row stays recognisably red.
+        let own_bg = prepared
             .hl
             .line_style
             .as_ref()
-            .and_then(|s| colors.style_bg(s))
-        {
+            .and_then(|s| colors.style_bg(s));
+        if let Some(bg) = own_bg {
             painter.rect_filled(row_rect, CornerRadius::ZERO, bg);
-        } else if cursor == Some(row.line.offset) {
+        } else if cursor == Some(row.line.offset) && !selected {
             painter.rect_filled(row_rect, CornerRadius::ZERO, colors.current_line_bg);
+        }
+        if selected {
+            let fill = colors.selection_fill(own_bg.is_some());
+            painter.rect_filled(row_rect, CornerRadius::ZERO, fill);
+            painter.rect_filled(gutter_row, CornerRadius::ZERO, colors.selection_fill(false));
         }
         if current == Some(row.line.offset) {
             painter.rect_stroke(
@@ -850,6 +897,14 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
             );
         }
     }
+    if text_resp.has_focus() {
+        painter.rect_stroke(
+            text_rect.shrink(1.0),
+            CornerRadius::ZERO,
+            Stroke::new(2.0, colors.accent),
+            StrokeKind::Inside,
+        );
+    }
     // Gutter / text separator.
     painter.vline(
         text_left,
@@ -897,7 +952,15 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
 
     // ---- hint: lines are cut off
     if need_hbar && !view.wrap {
-        draw_cut_hint(ui, id, view, text_rect, &font, colors, &painter);
+        draw_cut_hint(
+            ui,
+            id,
+            &mut view.cut_hint_dismissed,
+            text_rect,
+            &font,
+            colors,
+            &painter,
+        );
     }
 
     // ---- "new lines" pill
@@ -924,6 +987,13 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
             size,
         );
         let resp = ui.interact(rect, id.with("pill"), Sense::click());
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                true,
+                format!("Resume following, {new_lines} new lines"),
+            )
+        });
         let fill = if resp.hovered() {
             mix32(colors.accent, Color32::WHITE, 0.2)
         } else {
@@ -1177,7 +1247,8 @@ fn draw_scrollbar(
         fractions.position = d;
     }
     let thumb = thumb_px(track.height(), fractions, 24.0);
-    let resp = ui.interact(track, id.with("vbar"), Sense::click_and_drag());
+    let resp = ui.interact(track, id.with("vbar"), pointer_sense());
+    a11y_scrollbar(&resp, "Vertical scrollbar", fractions.position, true);
     let grab_id = id.with("vbar-grab");
     if resp.drag_started()
         && let Some(p) = resp.interact_pointer_pos()
@@ -1223,14 +1294,43 @@ fn draw_scrollbar(
     painter.rect_filled(thumb_rect, CornerRadius::same(3), thumb_color);
 }
 
-/// The horizontal scrollbar: same look as the vertical one, with hover and
-/// drag feedback. A click on the track pages sideways, a drag moves the
-/// thumb.
+/// The horizontal scrollbar of a log view.
 #[allow(clippy::too_many_arguments)]
 fn draw_hscrollbar(
     ui: &mut Ui,
     id: Id,
     view: &mut DocView,
+    track: Rect,
+    view_w: f32,
+    max_h: f32,
+    colors: &Colors,
+    painter: &egui::Painter,
+) {
+    let total = view.max_text_w + PAD * 2.0;
+    hscrollbar(
+        ui,
+        id,
+        &mut view.h_scroll,
+        total,
+        track,
+        view_w,
+        max_h,
+        colors,
+        painter,
+    );
+}
+
+/// The horizontal scrollbar: same look as the vertical one, with hover and
+/// drag feedback. A click on the track pages sideways, a drag moves the
+/// thumb. `total_w` is the width of the content (with padding), `view_w`
+/// that of the viewport and `max_h` the largest `h_scroll`. Shared with the
+/// merged view.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hscrollbar(
+    ui: &mut Ui,
+    id: Id,
+    h_scroll: &mut f32,
+    total_w: f32,
     track: Rect,
     view_w: f32,
     max_h: f32,
@@ -1243,17 +1343,27 @@ fn draw_hscrollbar(
         track.top() + 0.5,
         Stroke::new(1.0, colors.border),
     );
-    let total = view.max_text_w + PAD * 2.0;
+    let total = total_w;
     let len = (track.width() * (view_w / total.max(1.0)).clamp(0.0, 1.0))
         .max(24.0)
         .min(track.width());
     let room = (track.width() - len).max(0.0);
     let start = if max_h > 0.0 {
-        (view.h_scroll / max_h).clamp(0.0, 1.0) * room
+        (*h_scroll / max_h).clamp(0.0, 1.0) * room
     } else {
         0.0
     };
-    let resp = ui.interact(track, id.with("hbar"), Sense::click_and_drag());
+    let resp = ui.interact(track, id.with("hbar"), pointer_sense());
+    a11y_scrollbar(
+        &resp,
+        "Horizontal scrollbar",
+        if max_h > 0.0 {
+            f64::from((*h_scroll / max_h).clamp(0.0, 1.0))
+        } else {
+            0.0
+        },
+        false,
+    );
     let grab_id = id.with("hbar-grab");
     if resp.drag_started()
         && let Some(p) = resp.interact_pointer_pos()
@@ -1272,16 +1382,16 @@ fn draw_hscrollbar(
     {
         let grab = ui.data(|d| d.get_temp::<f32>(grab_id)).unwrap_or(len * 0.5);
         let f = ((p.x - track.left() - grab) / room).clamp(0.0, 1.0);
-        view.h_scroll = f * max_h;
+        *h_scroll = f * max_h;
     } else if resp.clicked()
         && let Some(p) = resp.interact_pointer_pos()
     {
         // On the track beside the thumb: one page towards the click.
         let x = p.x - track.left();
         if x < start {
-            view.h_scroll = (view.h_scroll - view_w * 0.9).max(0.0);
+            *h_scroll = (*h_scroll - view_w * 0.9).max(0.0);
         } else if x > start + len {
-            view.h_scroll = (view.h_scroll + view_w * 0.9).min(max_h);
+            *h_scroll = (*h_scroll + view_w * 0.9).min(max_h);
         }
     }
     let thumb = rect_between(
@@ -1298,16 +1408,16 @@ fn draw_hscrollbar(
 
 /// A small pill at the bottom right telling that lines are cut off and how
 /// to read them. Shown until dismissed (once per tab).
-fn draw_cut_hint(
+pub(crate) fn draw_cut_hint(
     ui: &mut Ui,
     id: Id,
-    view: &mut DocView,
+    dismissed: &mut bool,
     text_rect: Rect,
     font: &FontId,
     colors: &Colors,
     painter: &egui::Painter,
 ) {
-    if view.cut_hint_dismissed {
+    if *dismissed {
         return;
     }
     let text = "Lines are cut off. Alt+Z wraps them, Shift+wheel scrolls sideways.";
@@ -1340,6 +1450,13 @@ fn draw_cut_hint(
     let close =
         Rect::from_center_size(pos2(rect.right() - 12.0, rect.center().y), vec2(14.0, 14.0));
     let resp = ui.interact(close, id.with("cut-hint-x"), Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            true,
+            "Dismiss the hint about cut-off lines",
+        )
+    });
     let c = if resp.hovered() {
         colors.text
     } else {
@@ -1350,7 +1467,7 @@ fn draw_cut_hint(
     painter.line_segment([m + vec2(-3.5, -3.5), m + vec2(3.5, 3.5)], s);
     painter.line_segment([m + vec2(-3.5, 3.5), m + vec2(3.5, -3.5)], s);
     if resp.clicked() {
-        view.cut_hint_dismissed = true;
+        *dismissed = true;
     }
     resp.on_hover_text("Dismiss");
 }
@@ -1364,7 +1481,18 @@ fn draw_minimap(
     colors: &Colors,
     painter: &egui::Painter,
 ) {
-    painter.rect_filled(rect, CornerRadius::ZERO, colors.gutter_bg);
+    // A strip of its own: slightly apart from the scrollbar track, with a
+    // separator, so it is visible even when nothing is marked yet.
+    painter.rect_filled(
+        rect,
+        CornerRadius::ZERO,
+        mix32(colors.gutter_bg, colors.background, 0.5),
+    );
+    painter.vline(
+        rect.left() + 0.5,
+        rect.y_range(),
+        Stroke::new(1.0, colors.border),
+    );
     let bins = rect.height().floor().max(1.0) as usize;
     let mut cache = std::mem::take(&mut view.minimap);
     cache.refresh(view, bins);
@@ -1377,8 +1505,9 @@ fn draw_minimap(
         if let Some(Some((n, c))) = cache.ticks.get(i) {
             let _ = n;
             let col = colors.tick(c);
+            // Rule hits (severity ticks): two pixels tall so they are seen.
             painter.rect_filled(
-                rect_between(pos2(x0 + 1.0, y), pos2(x0 + w * 0.5, y + 1.0)),
+                rect_between(pos2(x0 + 2.0, y), pos2(x0 + w * 0.65, y + 2.0)),
                 CornerRadius::ZERO,
                 col,
             );
@@ -1451,14 +1580,22 @@ fn draw_minimap(
             pos2(rect.left(), rect.top() + a as f32),
             pos2(rect.right(), rect.top() + (b + 1) as f32),
         );
+        // The visible region: a tinted window with an outline.
+        let tint =
+            Color32::from_rgba_unmultiplied(colors.text.r(), colors.text.g(), colors.text.b(), 34);
+        painter.rect_filled(r, CornerRadius::ZERO, tint);
         painter.rect_stroke(
             r,
             CornerRadius::ZERO,
-            Stroke::new(1.0, mix32(colors.border, colors.text, 0.5)),
+            Stroke::new(1.0, mix32(colors.border, colors.text, 0.6)),
             StrokeKind::Inside,
         );
     }
-    let resp = ui.interact(rect, id.with("minimap"), Sense::click_and_drag());
+    let resp = ui.interact(rect, id.with("minimap"), pointer_sense());
+    let mm_pos = extent.map_or(0.0, |(a, _)| a as f64 / bins.max(1) as f64);
+    resp.widget_info(|| {
+        egui::WidgetInfo::slider(true, mm_pos, "Minimap: search matches and rule hits")
+    });
     if (resp.clicked() || resp.dragged())
         && let Some(p) = resp.interact_pointer_pos()
     {

@@ -9,14 +9,16 @@ use egui::{
     UiBuilder, vec2,
 };
 use oxtail_config::SplitDirection;
-use oxtail_search::CaseMode;
 
 use crate::app::OxTailApp;
 use crate::cross::CrossTarget;
 use crate::logview::ViewEnv;
 use crate::mergepaint::{self, badge_color};
 use crate::mergeview::{MergedView, badge_letter};
-use crate::panels::{FilterPanelOptions, filter_panel_ui};
+use crate::panels::{
+    FilterPanelOptions, Icon, a11y_label, a11y_role, case_chip, filter_panel_ui, follow_chip,
+    icon_button, toggle_chip,
+};
 use crate::panes::{Edge, PaneId, edge_at, extent_of, ratio_at};
 use crate::tab::{TabContent, drop_index, move_item};
 use crate::util::{fmt_bytes, fmt_count};
@@ -53,6 +55,12 @@ impl OxTailApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
+                    // The strip is a tab list for screen readers; the tabs
+                    // below become its children.
+                    ui.ctx().accesskit_node_builder(ui.unique_id(), |b| {
+                        b.set_role(egui::accesskit::Role::TabList);
+                        b.set_label("Open files".to_owned());
+                    });
                     for &i in &strip {
                         let tab = &self.tabs[i];
                         let selected = Some(i) == active;
@@ -70,6 +78,27 @@ impl OxTailApp {
                         let size = vec2(galley.size().x + 22.0 + close_w, 26.0);
                         let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
                         centers.push(rect.center().x);
+                        let tab_label = tab.label();
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &tab_label)
+                        });
+                        a11y_role(&resp, egui::accesskit::Role::Tab);
+                        ui.ctx().accesskit_node_builder(resp.id, |b| {
+                            b.set_selected(selected);
+                            if tab.merged().is_some() {
+                                b.set_description("Merged view".to_owned());
+                            } else if let Some(p) = &tab.path {
+                                b.set_description(p.display().to_string());
+                            }
+                        });
+                        if resp.has_focus() {
+                            ui.painter().rect_stroke(
+                                rect,
+                                CornerRadius::same(4),
+                                egui::Stroke::new(2.0, colors.accent),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
                         let bg = if selected {
                             colors.background
                         } else if resp.hovered() {
@@ -112,6 +141,13 @@ impl OxTailApp {
                         );
                         let close_resp =
                             ui.interact(close_rect, Id::new(("tab-close", tab.id)), Sense::click());
+                        close_resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                format!("Close {tab_label}"),
+                            )
+                        });
                         let c = if close_resp.hovered() {
                             colors.text
                         } else {
@@ -185,11 +221,11 @@ impl OxTailApp {
                             }
                         });
                     }
-                    if ui
+                    let plus = ui
                         .add(egui::Button::new("+").frame(false))
-                        .on_hover_text("Open a file (Ctrl+O)")
-                        .clicked()
-                    {
+                        .on_hover_text("Open a file (Ctrl+O)");
+                    a11y_label(&plus, "Open a file");
+                    if plus.clicked() {
                         self.file_dialog_requested = true;
                     }
                 });
@@ -465,7 +501,7 @@ impl OxTailApp {
             });
         }
         egui::Panel::bottom(Id::new(("mstatus", tab_id))).show(ui, |ui| {
-            merged_status(ui, mv);
+            merged_status(ui, mv, &colors);
         });
         let env = ViewEnv {
             colors: &colors,
@@ -570,6 +606,7 @@ impl OxTailApp {
                             .hint_text("text or regex")
                             .desired_width(300.0),
                     );
+                    a11y_label(&resp, "Search in all tabs");
                     if st.focus {
                         resp.request_focus();
                         st.focus = false;
@@ -577,24 +614,14 @@ impl OxTailApp {
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         start = true;
                     }
-                    ui.toggle_value(&mut st.regex, ".*")
-                        .on_hover_text("Regular expression");
-                    let case_label = if st.case == CaseMode::Insensitive {
-                        "aa"
-                    } else {
-                        "Aa"
-                    };
-                    if ui
-                        .selectable_label(st.case != CaseMode::Smart, case_label)
-                        .on_hover_text("Case: smart / sensitive / insensitive")
-                        .clicked()
-                    {
-                        st.case = match st.case {
-                            CaseMode::Smart => CaseMode::Sensitive,
-                            CaseMode::Sensitive => CaseMode::Insensitive,
-                            CaseMode::Insensitive => CaseMode::Smart,
-                        };
-                    }
+                    toggle_chip(
+                        ui,
+                        &mut st.regex,
+                        ".*",
+                        "Regular expression",
+                        "Regular expression: on treats the text as a pattern",
+                    );
+                    case_chip(ui, &mut st.case, "");
                     if ui.button("Search").clicked() {
                         start = true;
                     }
@@ -781,6 +808,7 @@ fn merged_find_bar(ui: &mut Ui, tab_id: u64, mv: &mut MergedView, now: Instant) 
                 .hint_text("text or regex (searches the merged view)")
                 .desired_width(300.0),
         );
+        a11y_label(&resp, "Find text");
         if mv.find.focus {
             resp.request_focus();
             mv.find.focus = false;
@@ -793,42 +821,24 @@ fn merged_find_bar(ui: &mut Ui, tab_id: u64, mv: &mut MergedView, now: Instant) 
             mv.find_step(!shift);
             resp.request_focus();
         }
-        if ui
-            .toggle_value(&mut mv.find.regex, ".*")
-            .on_hover_text("Regular expression")
-            .changed()
+        if toggle_chip(
+            ui,
+            &mut mv.find.regex,
+            ".*",
+            "Regular expression",
+            "Regular expression: on treats the text as a pattern",
+        )
+        .changed()
         {
             mv.find_changed(now);
         }
-        let case_label = if mv.find.case == CaseMode::Insensitive {
-            "aa"
-        } else {
-            "Aa"
-        };
-        if ui
-            .selectable_label(mv.find.case != CaseMode::Smart, case_label)
-            .on_hover_text("Case: smart / sensitive / insensitive")
-            .clicked()
-        {
-            mv.find.case = match mv.find.case {
-                CaseMode::Smart => CaseMode::Sensitive,
-                CaseMode::Sensitive => CaseMode::Insensitive,
-                CaseMode::Insensitive => CaseMode::Smart,
-            };
+        if case_chip(ui, &mut mv.find.case, "") {
             mv.find_changed(now);
         }
-        if ui
-            .button("\u{2191}")
-            .on_hover_text("Previous match (Shift+F3)")
-            .clicked()
-        {
+        if icon_button(ui, Icon::Up, "Previous match", "Previous match (Shift+F3)").clicked() {
             mv.find_step(false);
         }
-        if ui
-            .button("\u{2193}")
-            .on_hover_text("Next match (F3)")
-            .clicked()
-        {
+        if icon_button(ui, Icon::Down, "Next match", "Next match (F3)").clicked() {
             mv.find_step(true);
         }
         if let Some(e) = &mv.find.problem {
@@ -849,7 +859,7 @@ fn merged_find_bar(ui: &mut Ui, tab_id: u64, mv: &mut MergedView, now: Instant) 
                 }
             ));
         }
-        if ui.button("\u{d7}").on_hover_text("Close (Esc)").clicked() {
+        if icon_button(ui, Icon::Close, "Close find bar", "Close (Esc)").clicked() {
             mv.find.open = false;
         }
     });
@@ -857,19 +867,9 @@ fn merged_find_bar(ui: &mut Ui, tab_id: u64, mv: &mut MergedView, now: Instant) 
 
 /// The status bar of a merged tab: follow state, the sources with their
 /// badges and line counts, and the size of the merged order.
-fn merged_status(ui: &mut Ui, mv: &mut MergedView) {
+fn merged_status(ui: &mut Ui, mv: &mut MergedView, colors: &crate::colors::Colors) {
     ui.horizontal_wrapped(|ui| {
-        let (dot, text) = if mv.follow {
-            (Color32::from_rgb(0x4c, 0xc3, 0x6b), "Following")
-        } else {
-            (Color32::from_rgb(0xe0, 0xaf, 0x68), "Paused")
-        };
-        ui.label(RichText::new("\u{25cf}").color(dot));
-        if ui
-            .selectable_label(false, text)
-            .on_hover_text("Click to toggle following (F)")
-            .clicked()
-        {
+        if follow_chip(ui, mv.follow, colors).clicked() {
             mv.toggle_follow();
         }
         ui.separator();

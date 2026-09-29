@@ -25,9 +25,18 @@ Higher priority wins when rules overlap; on a tie the later rule wins. Colours a
 
 | Priority | Rule | Matches | Scope | Style | Actions |
 |---:|---|---|---|---|---|
-| 20 | error level | column `level` `eq` `error` | `line` | bg `error.subtle` |  |
-| 10 | warn level | column `level` `eq` `warn` | `line` | bg `warn.subtle` |  |
-| 5 | slow durations | regex `\bduration=(\d{4,})ms` | `group:1` | fg `warn`, bold |  |
+| -10 | FATAL (text) | regex `\b(?:level\|lvl\|severity)="?(FATAL\|CRITICAL\|CRIT\|PANIC\|EMERG(?:ENCY)?\|ALERT)\b` (ignore case) | `group:1` | fg `error`, bold, underline | minimap `error` |
+| -10 | FATAL row | regex `\b(?:level\|lvl\|severity)="?(?:FATAL\|CRITICAL\|CRIT\|PANIC\|EMERG(?:ENCY)?\|ALERT)\b` (ignore case) | `line` | bg `error.subtle` |  |
+| -15 | ERROR (text) | regex `\b(?:level\|lvl\|severity)="?(ERROR\|ERR\|SEVERE)\b` (ignore case) | `group:1` | fg `error`, bold | minimap `error` |
+| -15 | ERROR row | regex `\b(?:level\|lvl\|severity)="?(?:ERROR\|ERR\|SEVERE)\b` (ignore case) | `line` | bg `error.subtle` |  |
+| -20 | WARN (text) | regex `\b(?:level\|lvl\|severity)="?(WARN(?:ING)?)\b` (ignore case) | `group:1` | fg `warn`, bold | minimap `warn` |
+| -20 | WARN row | regex `\b(?:level\|lvl\|severity)="?(?:WARN(?:ING)?)\b` (ignore case) | `line` | bg `warn.subtle` |  |
+| -25 | slow durations | regex `\bduration=(\d{4,})ms` | `group:1` | fg `warn`, bold |  |
+| -30 | INFO (text) | regex `\b(?:level\|lvl\|severity)="?(INFO(?:RMATION)?\|NOTICE)\b` (ignore case) | `group:1` | fg `info` |  |
+| -30 | DEBUG (text) | regex `\b(?:level\|lvl\|severity)="?(DEBUG\|DBG)\b` (ignore case) | `group:1` | fg `debug` |  |
+| -30 | TRACE (text) | regex `\b(?:level\|lvl\|severity)="?(TRACE\|TRC\|VERBOSE)\b` (ignore case) | `group:1` | fg `trace` |  |
+| -40 | keys | regex `(?:^\|\s)([A-Za-z_][\w.\-]*=)` | `group:1` | fg `muted` |  |
+| -40 | timestamp | regex `(?:^\|\s)(?:time\|ts\|timestamp)="?([^\s"]+)` | `group:1` | fg `muted` |  |
 
 ## The full profile
 
@@ -45,26 +54,99 @@ order = ["time", "ts", "level", "msg", "*"]
 column = "time"
 format = "auto"
 
-[[rules]]
-name = "error level"
-match = { column = "level", op = "eq", value = "error" }
-scope = "line"
-style = { bg = "error.subtle" }
-priority = 20
+# Built-in rules use negative priorities (-40 to -10), so a rule you add
+# (priority 0) wins where they overlap. Level colours: TRACE, DEBUG and INFO
+# use the theme's trace, debug and info colours, WARN warning, ERROR error,
+# FATAL error with underline; ERROR and
+# FATAL rows get a subtle background; timestamps and keys are muted. In the
+# table, level and timestamp cells take the same colours from their column kind.
 
 [[rules]]
-name = "warn level"
-match = { column = "level", op = "eq", value = "warn" }
+name = "keys"
+match = { regex = '(?:^|\s)([A-Za-z_][\w.\-]*=)' }
+scope = "group:1"
+style = { fg = "muted" }
+priority = -40
+
+[[rules]]
+name = "timestamp"
+match = { regex = '(?:^|\s)(?:time|ts|timestamp)="?([^\s"]+)' }
+scope = "group:1"
+style = { fg = "muted" }
+priority = -40
+
+[[rules]]
+name = "FATAL (text)"
+match = { regex = '\b(?:level|lvl|severity)="?(FATAL|CRITICAL|CRIT|PANIC|EMERG(?:ENCY)?|ALERT)\b', case_sensitive = false }
+scope = "group:1"
+style = { fg = "error", bold = true, underline = true }
+priority = -10
+minimap = "error"
+
+[[rules]]
+name = "ERROR (text)"
+match = { regex = '\b(?:level|lvl|severity)="?(ERROR|ERR|SEVERE)\b', case_sensitive = false }
+scope = "group:1"
+style = { fg = "error", bold = true }
+priority = -15
+minimap = "error"
+
+[[rules]]
+name = "WARN (text)"
+match = { regex = '\b(?:level|lvl|severity)="?(WARN(?:ING)?)\b', case_sensitive = false }
+scope = "group:1"
+style = { fg = "warn", bold = true }
+priority = -20
+minimap = "warn"
+
+[[rules]]
+name = "INFO (text)"
+match = { regex = '\b(?:level|lvl|severity)="?(INFO(?:RMATION)?|NOTICE)\b', case_sensitive = false }
+scope = "group:1"
+style = { fg = "info" }
+priority = -30
+
+[[rules]]
+name = "DEBUG (text)"
+match = { regex = '\b(?:level|lvl|severity)="?(DEBUG|DBG)\b', case_sensitive = false }
+scope = "group:1"
+style = { fg = "debug" }
+priority = -30
+
+[[rules]]
+name = "TRACE (text)"
+match = { regex = '\b(?:level|lvl|severity)="?(TRACE|TRC|VERBOSE)\b', case_sensitive = false }
+scope = "group:1"
+style = { fg = "trace" }
+priority = -30
+
+[[rules]]
+name = "FATAL row"
+match = { regex = '\b(?:level|lvl|severity)="?(?:FATAL|CRITICAL|CRIT|PANIC|EMERG(?:ENCY)?|ALERT)\b', case_sensitive = false }
+scope = "line"
+style = { bg = "error.subtle" }
+priority = -10
+
+[[rules]]
+name = "ERROR row"
+match = { regex = '\b(?:level|lvl|severity)="?(?:ERROR|ERR|SEVERE)\b', case_sensitive = false }
+scope = "line"
+style = { bg = "error.subtle" }
+priority = -15
+
+[[rules]]
+name = "WARN row"
+match = { regex = '\b(?:level|lvl|severity)="?(?:WARN(?:ING)?)\b', case_sensitive = false }
 scope = "line"
 style = { bg = "warn.subtle" }
-priority = 10
+priority = -20
 
 [[rules]]
 name = "slow durations"
 match = { regex = '\bduration=(\d{4,})ms' }
 scope = "group:1"
 style = { fg = "warn", bold = true }
-priority = 5
+priority = -25
 ```
 
 ## Using it

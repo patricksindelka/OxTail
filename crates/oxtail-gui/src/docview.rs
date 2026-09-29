@@ -350,7 +350,15 @@ pub struct DocView {
     back_attempts: HashMap<u64, u32>,
     pending_px: f32,
     resume_on_bottom: bool,
-    paused_at_lines: u64,
+    /// Line count when following stopped (`None` while following, or before
+    /// the first frame that saw the view paused).
+    paused_at_lines: Option<u64>,
+    /// The baseline was taken implicitly (the view stopped following by a
+    /// jump, or opened paused) and follows the estimate until the index is
+    /// first exact, so the initial scan does not count as "new" lines.
+    paused_implicit: bool,
+    /// The line index has been exact at least once (the initial scan is over).
+    index_settled: bool,
     jump_wanted: Option<f64>,
     initial_line: Option<u64>,
     start_lines: Option<usize>,
@@ -426,7 +434,9 @@ impl DocView {
             back_attempts: HashMap::new(),
             pending_px: 0.0,
             resume_on_bottom: false,
-            paused_at_lines: 0,
+            paused_at_lines: None,
+            paused_implicit: false,
+            index_settled: false,
             jump_wanted: None,
             initial_line: init.initial_line,
             start_lines: init.start_lines,
@@ -881,6 +891,7 @@ impl DocView {
         if exact && !self.was_exact {
             self.cache.drop_inexact();
         }
+        self.track_pause_baseline(exact);
         self.was_exact = exact;
 
         self.pending
@@ -903,6 +914,12 @@ impl DocView {
             return;
         }
         self.cache.reset(g);
+        // A new generation is a new file: the old "new lines" baseline is void.
+        self.index_settled = false;
+        self.paused_implicit = false;
+        if !self.follow {
+            self.paused_at_lines = Some(0);
+        }
         self.pending.clear();
         self.back_attempts.clear();
         self.pos = Pos::default();
@@ -1335,7 +1352,8 @@ impl DocView {
     pub fn pause_follow(&mut self) {
         if self.follow {
             self.follow = false;
-            self.paused_at_lines = self.snapshot.lines.estimated_total;
+            self.paused_at_lines = Some(self.snapshot.lines.estimated_total);
+            self.paused_implicit = false;
             self.resume_on_bottom = true;
         }
     }
@@ -1360,15 +1378,36 @@ impl DocView {
         }
     }
 
+    /// Keeps the "new lines while paused" baseline: cleared while following,
+    /// and taken from the current count when the view stopped following in a
+    /// way that did not go through [`DocView::pause_follow`] (a jump to a
+    /// search hit, opening at a line).
+    fn track_pause_baseline(&mut self, exact: bool) {
+        if self.follow {
+            self.paused_at_lines = None;
+        } else {
+            let total = self.snapshot.lines.estimated_total;
+            if self.paused_at_lines.is_none() {
+                self.paused_at_lines = Some(total);
+                self.paused_implicit = true;
+            } else if self.paused_implicit && !self.index_settled {
+                // The initial scan is still running: its growing estimate is
+                // not "new lines".
+                self.paused_at_lines = Some(total);
+            }
+        }
+        if exact {
+            self.index_settled = true;
+        }
+    }
+
     /// Lines that arrived while paused (approximate while indexing).
     pub fn new_lines_while_paused(&self) -> u64 {
         if self.follow {
             0
         } else {
-            self.snapshot
-                .lines
-                .estimated_total
-                .saturating_sub(self.paused_at_lines)
+            let total = self.snapshot.lines.estimated_total;
+            total.saturating_sub(self.paused_at_lines.unwrap_or(total))
         }
     }
 
@@ -2064,6 +2103,56 @@ mod tests {
         v.scroll_px(10_000.0);
         run_until(&mut v, |v, _| v.follow);
         assert_eq!(v.new_lines_while_paused(), 0);
+    }
+
+    #[test]
+    fn the_new_lines_baseline_does_not_survive_truncation() {
+        // Regression: pause at 300 lines, the file is truncated and 300 new
+        // lines arrive: the pill must say 300, not 0.
+        let (doc, mem) = doc_with(300);
+        let mut v = DocView::new(doc, &init(true));
+        run_until(&mut v, |v, vis| {
+            v.snapshot.lines.exact && vis.rows.last().is_some_and(|r| r.line.number == 299)
+        });
+        v.scroll_px(-160.0);
+        run_until(&mut v, |v, _| !v.follow);
+        let mut fresh = String::new();
+        for i in 0..300 {
+            fresh.push_str(&format!("new {i:05}\n"));
+        }
+        mem.replace(fresh.into_bytes());
+        // Pump without laying out until the truncation has been seen (max ~5 s).
+        for _ in 0..1000 {
+            v.pump(Instant::now());
+            if v.snapshot.generation > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(v.snapshot.generation > 0, "truncation not seen");
+        run_until(&mut v, |v, _| v.new_lines_while_paused() >= 300);
+        assert_eq!(v.new_lines_while_paused(), 300);
+    }
+
+    #[test]
+    fn jumping_away_from_the_tail_does_not_count_existing_lines_as_new() {
+        // Regression: a jump (Find, go to line) that stops following left the
+        // baseline at 0, so a static 400-line file showed "400 new lines".
+        let (doc, mem) = doc_with(400);
+        let mut v = DocView::new(doc, &init(true));
+        run_until(&mut v, |v, vis| {
+            v.snapshot.lines.exact && vis.rows.last().is_some_and(|r| r.line.number == 399)
+        });
+        v.jump_top();
+        assert!(!v.follow);
+        for _ in 0..3 {
+            v.pump(Instant::now());
+        }
+        assert_eq!(v.new_lines_while_paused(), 0);
+        // Lines appended after the jump do count.
+        mem.append(b"a\nb\n");
+        run_until(&mut v, |v, _| v.new_lines_while_paused() >= 2);
+        assert_eq!(v.new_lines_while_paused(), 2);
     }
 
     #[test]

@@ -413,7 +413,7 @@ mod tests {
         h.set_profile(set.by_name("Java / log4j"));
         assert_eq!(h.profile.as_deref(), Some("Java / log4j"));
         assert!(h.warnings.is_empty(), "{:?}", h.warnings);
-        assert!(h.rules.iter().any(|r| r.name == "ERROR"));
+        assert!(h.rules.iter().any(|r| r.name == "ERROR (text)"));
         h.set_profile(None);
         assert!(h.profile.is_none());
         assert!(h.rules.len() > 5);
@@ -424,5 +424,245 @@ mod tests {
         };
         h.set_profile(Some(&empty));
         assert!(h.rules.len() > 5);
+    }
+
+    // ---- severity colouring across the built-in profiles
+
+    use oxtail_columns::ParserSpec;
+    use oxtail_highlight::SemanticColor as Sem;
+
+    /// The text and semantic foreground of every span with a foreground.
+    fn fg_spans(p: &Prepared) -> Vec<(String, Sem)> {
+        p.hl.spans
+            .iter()
+            .filter_map(|s| match s.style.fg? {
+                ColorRef::Semantic { color, .. } => {
+                    Some((p.text[s.range.clone()].to_string(), color))
+                }
+                ColorRef::Rgb(_) => None,
+            })
+            .collect()
+    }
+
+    fn state_for(profile: &str, parser: Option<ParserSpec>) -> HighlightState {
+        let set = ProfileSet::builtin();
+        let mut h = HighlightState::with_defaults();
+        h.set_profile(Some(set.by_name(profile).expect("profile")));
+        assert!(h.warnings.is_empty(), "{:?}", h.warnings);
+        if let Some(spec) = parser {
+            h.set_parser(Some(Arc::new(spec.compile().expect("parser"))));
+        }
+        h
+    }
+
+    fn log4j_parser() -> ParserSpec {
+        let set = ProfileSet::builtin();
+        let cols = set.by_name("Java / log4j").unwrap().columns.as_ref();
+        let pattern = cols
+            .and_then(|c| c.get("pattern"))
+            .and_then(toml::Value::as_str)
+            .expect("pattern")
+            .to_string();
+        ParserSpec::Regex {
+            pattern,
+            kinds: Default::default(),
+        }
+    }
+
+    const LEVELS: [(&str, Sem); 6] = [
+        ("TRACE", Sem::Trace),
+        ("DEBUG", Sem::Debug),
+        ("INFO", Sem::Info),
+        ("WARN", Sem::Warn),
+        ("ERROR", Sem::Error),
+        ("FATAL", Sem::Error),
+    ];
+
+    #[test]
+    fn generic_profile_colours_levels_and_mutes_timestamps() {
+        let mut h = state_for("Generic", None);
+        for (i, (lvl, want)) in LEVELS.iter().enumerate() {
+            let text = format!("2026-09-22 14:42:31.962 [main] {lvl:<5} app.Db - reading");
+            let p = h.prepare(&line(i as u64 * 100, &text));
+            let spans = fg_spans(&p);
+            assert!(
+                spans.contains(&((*lvl).to_string(), *want)),
+                "{lvl}: {spans:?}"
+            );
+            assert!(
+                spans.contains(&("2026-09-22 14:42:31.962".to_string(), Sem::Muted)),
+                "{lvl}: {spans:?}"
+            );
+            let row = p.hl.line_style.is_some_and(|s| s.bg.is_some());
+            assert_eq!(row, matches!(*lvl, "ERROR" | "FATAL"), "{lvl}");
+        }
+    }
+
+    #[test]
+    fn log4j_colours_levels_in_text_with_and_without_columns() {
+        for parser in [None, Some(log4j_parser())] {
+            let mut h = state_for("Java / log4j", parser);
+            for (i, (lvl, want)) in LEVELS.iter().enumerate() {
+                let text = format!(
+                    "2026-09-22 14:42:31.962 [main] {lvl:<5} app.Db - {lvl} in the message"
+                );
+                let p = h.prepare(&line(i as u64 * 100, &text));
+                let spans = fg_spans(&p);
+                assert!(
+                    spans.contains(&((*lvl).to_string(), *want)),
+                    "{lvl}: {spans:?}"
+                );
+                // Only the level itself is coloured, not the same word later.
+                assert_eq!(
+                    spans.iter().filter(|(t, c)| t == lvl && c == want).count(),
+                    1,
+                    "{lvl}: {spans:?}"
+                );
+                let ts = "2026-09-22 14:42:31.962".to_string();
+                assert!(spans.contains(&(ts, Sem::Muted)), "{lvl}: {spans:?}");
+                let row = p.hl.line_style.is_some_and(|s| s.bg.is_some());
+                assert_eq!(row, matches!(*lvl, "ERROR" | "FATAL"), "{lvl}");
+            }
+        }
+    }
+
+    #[test]
+    fn log4j_colours_spring_tomcat_and_python_layouts() {
+        let mut h = state_for("Java / log4j", None);
+        let cases = [
+            (
+                "2026-09-29T10:01:02.123+02:00 ERROR 1 --- [main] app.Db : failed",
+                "ERROR",
+                Sem::Error,
+                true,
+            ),
+            (
+                "29-Sep-2026 10:01:02.123 WARNING [main] org.apache.Catalina slow",
+                "WARNING",
+                Sem::Warn,
+                false,
+            ),
+            (
+                "2026-09-29 10:01:02,123 - app.db - ERROR - connection lost",
+                "ERROR",
+                Sem::Error,
+                true,
+            ),
+            (
+                "29-Sep-2026 10:01:02.123 SEVERE [main] org.apache.Catalina boom",
+                "SEVERE",
+                Sem::Error,
+                true,
+            ),
+        ];
+        for (i, (text, word, want, row)) in cases.iter().enumerate() {
+            let p = h.prepare(&line(i as u64 * 100, text));
+            let spans = fg_spans(&p);
+            assert!(
+                spans.contains(&((*word).to_string(), *want)),
+                "{text}: {spans:?}"
+            );
+            let has_row = p.hl.line_style.is_some_and(|s| s.bg.is_some());
+            assert_eq!(has_row, *row, "{text}");
+        }
+        // An INFO line that mentions ERROR later is not reddened.
+        let p = h.prepare(&line(
+            900,
+            "2026-09-29 10:01:02.123 [main] INFO  a.B - ERROR later",
+        ));
+        assert!(p.hl.line_style.is_none_or(|s| s.bg.is_none()));
+        assert!(!fg_spans(&p).contains(&("ERROR".to_string(), Sem::Error)));
+    }
+
+    #[test]
+    fn logfmt_and_json_colour_the_level_value_and_mute_keys() {
+        let logfmt = ParserSpec::Logfmt {
+            columns: vec!["ts".into(), "level".into(), "msg".into()],
+            kinds: Default::default(),
+        };
+        let json = ParserSpec::JsonLines {
+            columns: vec!["ts".into(), "level".into(), "msg".into()],
+            kinds: Default::default(),
+        };
+        for (profile, spec, mk) in [("logfmt", logfmt, 0), ("JSON lines", json, 1)] {
+            let mut h = state_for(profile, Some(spec));
+            for (i, (lvl, want)) in LEVELS.iter().enumerate() {
+                let l = lvl.to_lowercase();
+                let text = if mk == 0 {
+                    format!("ts=2026-09-29T10:00:00Z level={l} took=3ms msg=\"hello\"")
+                } else {
+                    format!(
+                        "{{\"ts\":\"2026-09-29T10:00:00Z\",\"level\":\"{l}\",\"msg\":\"hello\"}}"
+                    )
+                };
+                let p = h.prepare(&line(i as u64 * 200, &text));
+                let spans = fg_spans(&p);
+                assert!(
+                    spans.contains(&(l.clone(), *want)),
+                    "{profile} {l}: {spans:?}"
+                );
+                assert!(
+                    spans
+                        .iter()
+                        .any(|(t, c)| t.contains("ts") && *c == Sem::Muted),
+                    "{profile}: keys or timestamps are muted: {spans:?}"
+                );
+                let row = p.hl.line_style.is_some_and(|s| s.bg.is_some());
+                assert_eq!(
+                    row,
+                    matches!(*lvl, "ERROR" | "FATAL" | "WARN"),
+                    "{profile} {l}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_user_rule_wins_over_the_built_in_severity_colours() {
+        use oxtail_highlight::Style;
+        let set = ProfileSet::builtin();
+        for prof in set.profiles() {
+            // Built-in rules stay below the priority a new rule gets (0), so
+            // that a rule a user adds wins where they overlap.
+            let adapted = rules_from_profile(prof);
+            assert!(
+                adapted.rules.iter().all(|r| r.priority < 0),
+                "{}: {:?}",
+                prof.name,
+                adapted
+                    .rules
+                    .iter()
+                    .filter(|r| r.priority >= 0)
+                    .map(|r| &r.name)
+                    .collect::<Vec<_>>()
+            );
+        }
+        let generic = rules_from_profile(set.by_name("Generic").unwrap());
+        let mut rules = generic.rules;
+        rules.push(
+            Rule::regex("mine", r"\bERROR\b").styled(Style::fg(ColorRef::solid(Sem::Accent2))),
+        );
+        let mut h = HighlightState::with_defaults();
+        h.set_rules(rules, None);
+        let p = h.prepare(&line(0, "2026-09-22 14:42:31 ERROR boom"));
+        let spans = fg_spans(&p);
+        assert!(
+            spans.contains(&("ERROR".to_string(), Sem::Accent2)),
+            "{spans:?}"
+        );
+        assert!(
+            !spans.contains(&("ERROR".to_string(), Sem::Error)),
+            "{spans:?}"
+        );
+    }
+
+    #[test]
+    fn error_rows_and_severity_ticks_show_in_the_minimap() {
+        let mut h = state_for("Generic", None);
+        h.prepare(&line(0, "12:00:00 INFO fine"));
+        h.prepare(&line(40, "12:00:01 ERROR bad"));
+        h.prepare(&line(80, "12:00:02 WARN meh"));
+        assert!(h.ticks.contains_key(&40) && h.ticks.contains_key(&80));
+        assert!(!h.ticks.contains_key(&0));
     }
 }

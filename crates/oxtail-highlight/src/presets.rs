@@ -25,7 +25,8 @@ fn ci(name: &str, pattern: &str) -> Rule {
 }
 
 /// One rule per log level: TRACE, DEBUG, INFO, WARN, ERROR, FATAL, including
-/// their common abbreviations and single-letter forms (`[W]`, ` E `).
+/// their common abbreviations and single-letter forms (`[W]`, ` E `), plus a
+/// subtle row background for ERROR and FATAL lines.
 ///
 /// The single-letter form ` E ` needs whitespace on both sides, so an
 /// isolated capital letter in prose can be highlighted too; disable the rule
@@ -67,7 +68,23 @@ pub fn log_levels() -> Vec<Rule> {
         )
         .with_minimap(ColorRef::solid(S::Error))
         .with_gutter(),
+        row("level: error row", "ERROR|ERR|SEVERE", 50),
+        row(
+            "level: fatal row",
+            "FATAL|CRITICAL|CRIT|EMERG|EMERGENCY|PANIC|ALERT",
+            60,
+        ),
     ]
+}
+
+/// A subtle background for the whole line of an error or fatal record (the
+/// level word must be near the start, so a message that merely mentions
+/// "error" does not turn the row red).
+fn row(name: &str, words: &str, prio: i32) -> Rule {
+    Rule::regex(name, format!(r"^.{{0,80}}?\b(?:{words})\b"))
+        .scoped(Scope::Line)
+        .styled(Style::default().on(ColorRef::subtle(S::Error)))
+        .with_priority(prio)
 }
 
 /// Timestamps: ISO 8601 / RFC 3339 (date, date-time, fractions, offsets),

@@ -39,7 +39,8 @@ pub struct Colors {
     pub gutter_bg: Color32,
     /// Gutter text.
     pub gutter_text: Color32,
-    /// Selected lines.
+    /// Selected lines (the solid theme colour; rows are tinted with
+    /// [`Colors::selection_overlay`] so their own colours stay readable).
     pub selection_bg: Color32,
     /// Hovered / current line.
     pub current_line_bg: Color32,
@@ -109,6 +110,26 @@ impl Colors {
             return cfg32(rgb);
         }
         rgb32(self.palette.resolve(c))
+    }
+
+    /// The translucent tint painted over selected rows, after their own
+    /// background: severity colours (an error row's red) show through it.
+    pub fn selection_overlay(&self) -> Color32 {
+        let c = self.selection_bg;
+        let alpha = if self.dark { 96 } else { 88 };
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+    }
+
+    /// What to paint over a selected row: the solid selection colour for a
+    /// plain row (a translucent tint over the plain background is nearly
+    /// invisible in the light and high-contrast themes), the translucent
+    /// overlay for a row with a background of its own, so severity shows through.
+    pub fn selection_fill(&self, row_has_bg: bool) -> Color32 {
+        if row_has_bg {
+            self.selection_overlay()
+        } else {
+            self.selection_bg
+        }
     }
 
     /// Foreground for a style (or the default text colour), with `dim`
@@ -224,6 +245,84 @@ mod tests {
                     let _ = c.resolve(&r);
                 }
             }
+        }
+    }
+
+    fn to_rgb(c: Color32) -> Rgb {
+        Rgb::new(c.r(), c.g(), c.b())
+    }
+
+    fn ratio(a: Color32, b: Color32) -> f64 {
+        oxtail_highlight::contrast_ratio(to_rgb(a), to_rgb(b))
+    }
+
+    #[test]
+    fn severity_colours_are_readable_in_every_theme() {
+        use oxtail_highlight::SemanticColor as S;
+        for theme in ThemeSet::builtin().themes() {
+            let c = Colors::from_theme(theme);
+            for s in [
+                S::Error,
+                S::Warn,
+                S::Info,
+                S::Success,
+                S::Debug,
+                S::Trace,
+                S::Muted,
+            ] {
+                let fg = c.resolve(&ColorRef::solid(s));
+                let r = ratio(fg, c.background);
+                assert!(r >= 4.5, "{} {s:?} on the background: {r:.2}", c.name);
+            }
+            // Error text on the subtle error row background.
+            let row = c.resolve(&ColorRef::subtle(S::Error));
+            let r = ratio(c.resolve(&ColorRef::solid(S::Error)), row);
+            assert!(r >= 4.5, "{} error on its row: {r:.2}", c.name);
+            // Default text on every subtle row background.
+            for s in [S::Error, S::Warn, S::Info] {
+                let r = ratio(c.text, c.resolve(&ColorRef::subtle(s)));
+                assert!(r >= 7.0, "{} text on {s:?} row: {r:.2}", c.name);
+            }
+            // Line numbers.
+            let r = ratio(c.gutter_text, c.gutter_bg);
+            assert!(r >= 4.5, "{} gutter: {r:.2}", c.name);
+        }
+    }
+
+    #[test]
+    fn selection_keeps_severity_rows_readable() {
+        for theme in ThemeSet::builtin().themes() {
+            let c = Colors::from_theme(theme);
+            let row = c.resolve(&ColorRef::subtle(oxtail_highlight::SemanticColor::Error));
+            let overlay = c.selection_overlay();
+            assert!(overlay.a() < 255 && overlay.a() > 0);
+            let tint = c.selection_bg;
+            let t = f32::from(overlay.a()) / 255.0;
+            let blended = mix32(row, tint, t);
+            // The row is still distinguishable from a selected plain row...
+            let plain = mix32(c.background, tint, t);
+            assert_ne!(blended, plain, "{}", c.name);
+            // ...and its text stays readable.
+            let err = c.resolve(&ColorRef::solid(oxtail_highlight::SemanticColor::Error));
+            assert!(
+                ratio(err, blended) >= 3.0,
+                "{}: {:.2}",
+                c.name,
+                ratio(err, blended)
+            );
+            assert!(ratio(c.text, blended) >= 4.5, "{}", c.name);
+        }
+    }
+
+    #[test]
+    fn a_selected_plain_row_stands_out_in_every_theme() {
+        for theme in ThemeSet::builtin().themes() {
+            let c = Colors::from_theme(theme);
+            let fill = c.selection_fill(false);
+            assert_eq!(fill.a(), 255, "{}", c.name);
+            let r = ratio(fill, c.background);
+            assert!(r >= 1.3, "{}: selected vs plain row {r:.2}", c.name);
+            assert_eq!(c.selection_fill(true), c.selection_overlay());
         }
     }
 

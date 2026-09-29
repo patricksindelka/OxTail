@@ -496,10 +496,11 @@ fn every_feature_can_be_on_at_once_without_breaking_the_frame() {
     }
     // New lines while paused make the pill appear.
     mem.append(b"appended 1\nappended 2\n");
-    for _ in 0..20 {
-        h.step();
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // (The count starts when following stopped, so wait for the two lines.)
+    step_until(&mut h, "the new lines are counted", |a| {
+        a.active_view()
+            .is_some_and(|v| v.new_lines_while_paused() >= 2)
+    });
     let v = h.state().active_view().unwrap();
     assert!(!v.follow);
     assert!(v.new_lines_while_paused() >= 2);

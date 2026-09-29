@@ -25,8 +25,10 @@ Higher priority wins when rules overlap; on a tie the later rule wins. Colours a
 
 | Priority | Rule | Matches | Scope | Style | Actions |
 |---:|---|---|---|---|---|
-| 20 | HTTP 5xx | column `sc-status` `ge` `500` | `line` | bg `error.subtle` |  |
-| 0 | Directives | regex `^#` | `line` | fg `muted` |  |
+| -15 | HTTP 5xx | column `sc-status` `ge` `500` | `column:sc-status` | fg `error`, bold | minimap `error` |
+| -15 | HTTP 5xx row | column `sc-status` `ge` `500` | `line` | bg `error.subtle` |  |
+| -20 | HTTP 4xx | column `sc-status` `ge` `400` | `column:sc-status` | fg `warn`, bold |  |
+| -35 | Directives | regex `^#` | `line` | fg `muted` |  |
 
 ## The full profile
 
@@ -43,19 +45,37 @@ order = ["date", "time", "*"]
 [timestamp]
 format = "auto"
 
+# Built-in rules use negative priorities (-40 to -10), so a rule you add
+# (priority 0) wins where they overlap.
+
 [[rules]]
 name = "Directives"
 match = { regex = '^#' }
 scope = "line"
 style = { fg = "muted" }
-priority = 0
+priority = -35
 
 [[rules]]
 name = "HTTP 5xx"
 match = { column = "sc-status", op = "ge", value = "500" }
+scope = "column:sc-status"
+style = { fg = "error", bold = true }
+priority = -15
+minimap = "error"
+
+[[rules]]
+name = "HTTP 4xx"
+match = { column = "sc-status", op = "ge", value = "400" }
+scope = "column:sc-status"
+style = { fg = "warn", bold = true }
+priority = -20
+
+[[rules]]
+name = "HTTP 5xx row"
+match = { column = "sc-status", op = "ge", value = "500" }
 scope = "line"
 style = { bg = "error.subtle" }
-priority = 20
+priority = -15
 ```
 
 ## Using it

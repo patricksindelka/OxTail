@@ -48,8 +48,9 @@ Higher priority wins when rules overlap; on a tie the later rule wins. Colours a
 
 | Priority | Rule | Matches | Scope | Style | Actions |
 |---:|---|---|---|---|---|
-| 20 | Errors | regex `(?i)\b(error\|fail(ed\|ure)?\|denied\|refused\|panic\|fatal\|segfault)\b` | `match` | fg `error`, bold |  |
-| 10 | Warnings | regex `(?i)\b(warn(ing)?\|timeout\|retry)\b` | `match` | fg `warn` |  |
+| -15 | Errors | regex `(?i)\b(error\|fail(ed\|ure)?\|denied\|refused\|panic\|fatal\|segfault)\b` | `match` | fg `error`, bold | minimap `error` |
+| -20 | Warnings | regex `(?i)\b(warn(ing)?\|timeout\|retry)\b` | `match` | fg `warn`, bold | minimap `warn` |
+| -40 | timestamp | regex `^(?:<\d{1,3}>(?:1 )?)?(\w{3} [ \d]\d \d\d:\d\d:\d\d\|\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\S*)` | `group:1` | fg `muted` |  |
 
 ## The full profile
 
@@ -66,19 +67,31 @@ order = ["ts", "host", "app", "tag", "pid", "procid", "msg"]
 [timestamp]
 format = "auto"
 
+# Built-in rules use negative priorities (-40 to -10), so a rule you add
+# (priority 0) wins where they overlap.
+
+[[rules]]
+name = "timestamp"
+match = { regex = '^(?:<\d{1,3}>(?:1 )?)?(\w{3} [ \d]\d \d\d:\d\d:\d\d|\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\S*)' }
+scope = "group:1"
+style = { fg = "muted" }
+priority = -40
+
 [[rules]]
 name = "Errors"
 match = { regex = '(?i)\b(error|fail(ed|ure)?|denied|refused|panic|fatal|segfault)\b' }
 scope = "match"
 style = { fg = "error", bold = true }
-priority = 20
+priority = -15
+minimap = "error"
 
 [[rules]]
 name = "Warnings"
 match = { regex = '(?i)\b(warn(ing)?|timeout|retry)\b' }
 scope = "match"
-style = { fg = "warn" }
-priority = 10
+style = { fg = "warn", bold = true }
+priority = -20
+minimap = "warn"
 ```
 
 ## Using it

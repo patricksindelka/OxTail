@@ -37,10 +37,12 @@ Higher priority wins when rules overlap; on a tie the later rule wins. Colours a
 
 | Priority | Rule | Matches | Scope | Style | Actions |
 |---:|---|---|---|---|---|
-| 30 | HTTP 5xx | regex ` " (5\d\d)  ` | `group:1` | fg `error`, bold |  |
-| 20 | HTTP 4xx | regex ` " (4\d\d)  ` | `group:1` | fg `warn` |  |
-| 10 | HTTP 2xx/3xx | regex ` " ([23]\d\d)  ` | `group:1` | fg `success` |  |
-| 0 | Health checks | regex `"(GET\|HEAD) /(health\|healthz\|ping\|status)[/ ?]` | `line` | fg `muted` |  |
+| -15 | HTTP 5xx | regex ` " (5\d\d)  ` | `group:1` | fg `error`, bold | minimap `error` |
+| -15 | HTTP 5xx row | column `status` `ge` `500` | `line` | bg `error.subtle` |  |
+| -20 | HTTP 4xx | regex ` " (4\d\d)  ` | `group:1` | fg `warn`, bold |  |
+| -30 | HTTP 2xx/3xx | regex ` " ([23]\d\d)  ` | `group:1` | fg `success` |  |
+| -35 | Health checks | regex `"(GET\|HEAD) /(health\|healthz\|ping\|status)[/ ?]` | `line` | fg `muted` |  |
+| -40 | timestamp | regex `\[(\d{1,2}/\w{3}/\d{4}:\d\d:\d\d:\d\d [+-]\d{4})\]` | `group:1` | fg `muted` |  |
 
 ## The full profile
 
@@ -58,33 +60,51 @@ order = ["remote", "ts", "method", "path", "status", "size", "*"]
 column = "ts"
 format = "apache"
 
+# Built-in rules use negative priorities (-40 to -10), so a rule you add
+# (priority 0) wins where they overlap.
+
+[[rules]]
+name = "timestamp"
+match = { regex = '\[(\d{1,2}/\w{3}/\d{4}:\d\d:\d\d:\d\d [+-]\d{4})\]' }
+scope = "group:1"
+style = { fg = "muted" }
+priority = -40
+
 [[rules]]
 name = "HTTP 5xx"
 match = { regex = '" (5\d\d) ' }
 scope = "group:1"
 style = { fg = "error", bold = true }
-priority = 30
+priority = -15
+minimap = "error"
 
 [[rules]]
 name = "HTTP 4xx"
 match = { regex = '" (4\d\d) ' }
 scope = "group:1"
-style = { fg = "warn" }
-priority = 20
+style = { fg = "warn", bold = true }
+priority = -20
 
 [[rules]]
 name = "HTTP 2xx/3xx"
 match = { regex = '" ([23]\d\d) ' }
 scope = "group:1"
 style = { fg = "success" }
-priority = 10
+priority = -30
+
+[[rules]]
+name = "HTTP 5xx row"
+match = { column = "status", op = "ge", value = "500" }
+scope = "line"
+style = { bg = "error.subtle" }
+priority = -15
 
 [[rules]]
 name = "Health checks"
 match = { regex = '"(GET|HEAD) /(health|healthz|ping|status)[/ ?]' }
 scope = "line"
 style = { fg = "muted" }
-priority = 0
+priority = -35
 hide = false
 ```
 

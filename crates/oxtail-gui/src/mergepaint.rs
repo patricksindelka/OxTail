@@ -8,8 +8,9 @@ use egui::{Align2, Color32, FontId, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
 use oxtail_highlight::{Style, StyledSpan};
 
 use crate::colors::{Colors, mix32};
-use crate::logview::{SCROLLBAR_W, ViewEnv, round_to_pixel};
+use crate::logview::{HBAR_H, SCROLLBAR_W, ViewEnv, draw_cut_hint, hscrollbar, round_to_pixel};
 use crate::mergeview::{MergedView, badge_letter, clamp_top};
+use crate::panels::{a11y_item, a11y_list, a11y_scrollbar, pointer_sense};
 use crate::text::{JobOptions, build_job, compose};
 use crate::viewport::{
     ScrollSpace, TrackClick, classify_click, digits, lines_target, position_at, thumb_px,
@@ -62,20 +63,31 @@ pub fn show(ui: &mut Ui, id: Id, mv: &mut MergedView, env: &ViewEnv<'_>) {
     let text_left = full.left() + gutter_w;
     let text_right = (full.right() - SCROLLBAR_W).max(text_left + 20.0);
     let text_w = text_right - text_left;
-    let track = Rect::from_min_max(pos2(text_right, full.top()), full.max);
-    mv.visible_rows = (full.height() / row_h).ceil().max(1.0) as usize;
+    // Room for the horizontal scrollbar, when the text is wider than the view
+    // (decided from the widest line seen so far, like the log view).
+    let need_hbar = mv.max_text_w + PAD * 2.0 > text_w;
+    let bottom = full.bottom() - if need_hbar { HBAR_H } else { 0.0 };
+    let body = Rect::from_min_max(full.min, pos2(full.right(), bottom));
+    let track = Rect::from_min_max(pos2(text_right, full.top()), body.max);
+    mv.visible_rows = (body.height() / row_h).ceil().max(1.0) as usize;
     mv.row_h = row_h;
 
     // ---- input
     let resp = ui.interact(
-        Rect::from_min_max(full.min, pos2(text_right, full.bottom())),
+        Rect::from_min_max(full.min, pos2(text_right, bottom)),
         id.with("rows"),
         Sense::click_and_drag(),
     );
+    let hbar_rect = Rect::from_min_max(pos2(text_left, bottom), pos2(text_right, full.bottom()));
     if ui.rect_contains_pointer(full) {
         let d = ui.input(|i| i.smooth_scroll_delta);
         if d.y != 0.0 {
-            mv.scroll_px(-d.y);
+            if need_hbar && ui.rect_contains_pointer(hbar_rect) {
+                // The plain wheel over the horizontal bar scrolls sideways.
+                mv.h_scroll = (mv.h_scroll - d.y).max(0.0);
+            } else {
+                mv.scroll_px(-d.y);
+            }
         }
         if d.x != 0.0 {
             mv.h_scroll = (mv.h_scroll - d.x).max(0.0);
@@ -90,13 +102,20 @@ pub fn show(ui: &mut Ui, id: Id, mv: &mut MergedView, env: &ViewEnv<'_>) {
     // ---- rows
     let text_painter = painter.with_clip_rect(Rect::from_min_max(
         pos2(text_left, full.top()),
-        pos2(text_right, full.bottom()),
+        pos2(text_right, bottom),
     ));
-    let gutter = Rect::from_min_max(full.min, pos2(text_left, full.bottom()));
+    let gutter = Rect::from_min_max(full.min, pos2(text_left, bottom));
     painter.rect_filled(gutter, CornerRadius::ZERO, colors.gutter_bg);
     let mut rows: Vec<(usize, Option<Arc<crate::mergeview::MergedLine>>)> =
         Vec::with_capacity(entries.len());
     let mut widest = mv.max_text_w;
+    let a11y_rows = a11y_list(
+        ui,
+        id.with("a11y-rows"),
+        body,
+        egui::accesskit::Role::ListBox,
+        "Merged log lines",
+    );
     let selection = mv.selected_range();
     let current = mv.find.open.then_some(mv.find.current).flatten();
     for (k, (index, e)) in entries.iter().enumerate() {
@@ -104,17 +123,35 @@ pub fn show(ui: &mut Ui, id: Id, mv: &mut MergedView, env: &ViewEnv<'_>) {
         let y = full.top() + k as f32 * row_h;
         let row_rect = Rect::from_min_max(pos2(text_left, y), pos2(text_right, y + row_h));
         let line = mv.cache.get(&e.raw()).cloned();
-        if selection.is_some_and(|(a, b)| a <= index && index <= b) {
-            painter.rect_filled(
-                Rect::from_min_max(pos2(full.left(), y), pos2(text_right, y + row_h)),
-                CornerRadius::ZERO,
-                colors.selection_bg,
+        if let (Some(list), Some(l)) = (&a11y_rows, &line) {
+            let src = mv.sources.get(e.source()).map_or("", |s| s.name.as_str());
+            a11y_item(
+                list,
+                id.with(("row", index)),
+                row_rect,
+                egui::accesskit::Role::ListBoxOption,
+                &crate::util::shorten(&l.line.text, 400),
+                Some(selection.is_some_and(|(a, b)| a <= index && index <= b)),
+                Some(&format!("{src}, line {}", l.line.number + 1)),
             );
-        } else if mv.is_match(index) {
+        }
+        // The line's own colour (severity) first, the selection as a tint over it.
+        let own_bg = line.as_ref().and_then(|l| line_bg(mv, colors, l));
+        if let Some(bg) = own_bg {
+            painter.rect_filled(row_rect, CornerRadius::ZERO, bg);
+        }
+        if mv.is_match(index) {
             painter.rect_filled(
                 row_rect,
                 CornerRadius::ZERO,
                 mix32(colors.background, colors.search_match_bg, 0.35),
+            );
+        }
+        if selection.is_some_and(|(a, b)| a <= index && index <= b) {
+            painter.rect_filled(
+                Rect::from_min_max(pos2(full.left(), y), pos2(text_right, y + row_h)),
+                CornerRadius::ZERO,
+                colors.selection_fill(own_bg.is_some() || mv.is_match(index)),
             );
         }
         if current == Some(index) {
@@ -170,7 +207,11 @@ pub fn show(ui: &mut Ui, id: Id, mv: &mut MergedView, env: &ViewEnv<'_>) {
     }
     mv.max_text_w = widest;
     mv.last_rows = rows;
-    painter.vline(text_left, full.y_range(), Stroke::new(1.0, colors.border));
+    painter.vline(
+        text_left,
+        full.top()..=bottom,
+        Stroke::new(1.0, colors.border),
+    );
 
     // ---- empty state
     if entries.is_empty() {
@@ -228,32 +269,52 @@ pub fn show(ui: &mut Ui, id: Id, mv: &mut MergedView, env: &ViewEnv<'_>) {
         }
     });
 
-    // ---- horizontal position indicator via shift+wheel only; scrollbar:
+    // ---- scrollbars
     draw_vbar(ui, id, mv, track, colors, &painter);
-
-    // ---- horizontal scrollbar
-    if max_h > 0.0 {
-        let hb = Rect::from_min_max(
-            pos2(text_left, full.bottom() - 8.0),
-            pos2(text_right, full.bottom()),
+    if need_hbar {
+        // Same bar (and drag, track and wheel behaviour) as the log view.
+        hscrollbar(
+            ui,
+            id,
+            &mut mv.h_scroll,
+            mv.max_text_w + PAD * 2.0,
+            hbar_rect,
+            text_w,
+            max_h,
+            colors,
+            &painter,
         );
-        let frac = (text_w / (mv.max_text_w + PAD * 2.0)).clamp(0.05, 1.0);
-        let len = hb.width() * frac;
-        let start = (mv.h_scroll / max_h) * (hb.width() - len);
         painter.rect_filled(
-            Rect::from_min_size(pos2(hb.left() + start, hb.top() + 2.0), vec2(len, 4.0)),
-            CornerRadius::same(2),
-            mix32(colors.border, colors.text, 0.3),
+            Rect::from_min_max(pos2(full.left(), bottom), pos2(text_left, full.bottom())),
+            CornerRadius::ZERO,
+            colors.gutter_bg,
         );
-        let r = ui.interact(hb, id.with("hbar"), Sense::click_and_drag());
-        if (r.dragged() || r.clicked())
-            && let Some(p) = r.interact_pointer_pos()
-            && hb.width() > len
-        {
-            let f = ((p.x - hb.left() - len * 0.5) / (hb.width() - len)).clamp(0.0, 1.0);
-            mv.h_scroll = f * max_h;
-        }
+        let text_rect = Rect::from_min_max(pos2(text_left, full.top()), pos2(text_right, bottom));
+        draw_cut_hint(
+            ui,
+            id,
+            &mut mv.cut_hint_dismissed,
+            text_rect,
+            &font,
+            colors,
+            &painter,
+        );
     }
+}
+
+/// The background colour of a merged line's row, from the rules that matched
+/// (an error row's subtle red).
+fn line_bg(
+    mv: &mut MergedView,
+    colors: &Colors,
+    l: &crate::mergeview::MergedLine,
+) -> Option<Color32> {
+    let prepared = mv.hls.get_mut(l.source)?.prepare(&l.line);
+    prepared
+        .hl
+        .line_style
+        .as_ref()
+        .and_then(|s| colors.style_bg(s))
 }
 
 /// The laid-out text of a merged line (cached per `(source, line)`).
@@ -335,7 +396,8 @@ fn draw_vbar(
         visible: mv.visible_rows as u64,
     };
     let thumb = thumb_px(track.height(), space.thumb(), 24.0);
-    let resp = ui.interact(track, id.with("vbar"), Sense::click_and_drag());
+    let resp = ui.interact(track, id.with("vbar"), pointer_sense());
+    a11y_scrollbar(&resp, "Vertical scrollbar", space.thumb().position, true);
     let grab_id = id.with("vbar-grab");
     if resp.drag_started()
         && let Some(p) = resp.interact_pointer_pos()
