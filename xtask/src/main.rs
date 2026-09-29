@@ -5,6 +5,7 @@ mod genlog;
 mod logfmt;
 
 use anyhow::{Result, bail};
+use lexopt::ValueExt;
 
 const HELP: &str = "\
 OxTail developer tasks.

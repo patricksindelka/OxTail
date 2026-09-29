@@ -108,7 +108,7 @@ impl Allowlist {
     }
 }
 
-fn elf_needed<E: elf::FileHeader<Endian = Endianness>>(data: &[u8]) -> Result<Vec<String>> {
+fn elf_needed<E: read::elf::FileHeader<Endian = Endianness>>(data: &[u8]) -> Result<Vec<String>> {
     let header = E::parse(data)?;
     let endian = header.endian()?;
     let sections = header.sections(endian, data)?;
@@ -118,7 +118,7 @@ fn elf_needed<E: elf::FileHeader<Endian = Endianness>>(data: &[u8]) -> Result<Ve
         if let Some((dyns, link)) = section.dynamic(endian, data)? {
             let strings = sections.strings(endian, data, link)?;
             for d in dyns {
-                if d.is_string(endian) && d.tag32(endian) == Some(elf::DT_NEEDED) {
+                if d.is_string(endian) && d.tag(endian) == elf::DT_NEEDED {
                     let name = d.string(endian, strings)?;
                     out.push(String::from_utf8_lossy(name).into_owned());
                 }
@@ -179,8 +179,8 @@ pub fn dependencies(data: &[u8]) -> Result<(Os, Vec<String>)> {
             Os::MacOs,
             macho_dylibs::<macho::MachHeader64<Endianness>>(data)?,
         ),
-        FileKind::Pe32 => (Os::Windows, pe_imports::<read::pe::ImageNtHeaders32>(data)?),
-        FileKind::Pe64 => (Os::Windows, pe_imports::<read::pe::ImageNtHeaders64>(data)?),
+        FileKind::Pe32 => (Os::Windows, pe_imports::<object::pe::ImageNtHeaders32>(data)?),
+        FileKind::Pe64 => (Os::Windows, pe_imports::<object::pe::ImageNtHeaders64>(data)?),
         k => bail!("unsupported binary format {k:?} (fat Mach-O archives are not supported)"),
     })
 }
