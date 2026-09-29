@@ -57,6 +57,7 @@ pub mod icon;
 pub mod keymap;
 pub mod linecache;
 pub mod logview;
+pub mod merge;
 pub mod minimap;
 pub mod panels;
 pub mod panes;
