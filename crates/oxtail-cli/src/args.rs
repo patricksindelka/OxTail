@@ -19,7 +19,8 @@ ARGS:
 
 OPTIONS:
     -n, --lines N        Start with the last N lines instead of the default tail view
-        --profile NAME   Highlight profile for the opened files
+        --profile NAME   Highlight profile for the opened files: a profile name or file
+                         name (case-insensitive) or a unique prefix, e.g. nginx
         --filter QUERY   Filter the opened files (only lines containing QUERY; start
                          with ? for a column query, e.g. '?level:ERROR status>=500')
         --merge          Open all the files as one merged tab, interleaved by timestamp

@@ -464,6 +464,87 @@ order = ["time", "level", "msg", "*"]"#,
         assert!(seen >= 5, "{seen}");
     }
 
+    /// The built-in log4j profile against real layouts, one of them reported by
+    /// a user (Log4j 2 / logback default with a date: `%d [%t] %-5level %logger - %msg`).
+    #[test]
+    fn log4j_profile_parses_common_layouts() {
+        let set = oxtail_config::ProfileSet::builtin();
+        let prof = set.by_name("Java / log4j").expect("built-in log4j profile");
+        let cfg = columns_from_table(prof.columns.as_ref().unwrap()).unwrap();
+        let (_, p) = cfg.resolve(&[]).unwrap();
+        let col = |name: &str| {
+            p.schema()
+                .find(name)
+                .unwrap_or_else(|| panic!("no column {name}"))
+        };
+        let cells = |line: &str| -> Vec<String> {
+            let r = p
+                .parse(line)
+                .unwrap_or_else(|| panic!("not parsed: {line}"));
+            ["time", "thread", "level", "logger", "message"]
+                .iter()
+                .map(|c| r.get(col(c)).unwrap_or("").to_string())
+                .collect()
+        };
+        assert_eq!(
+            cells(
+                "2026-09-22 14:42:31.962 [main] INFO  liquibase.database - Set default schema name to dbo"
+            ),
+            [
+                "2026-09-22 14:42:31.962",
+                "main",
+                "INFO",
+                "liquibase.database",
+                "Set default schema name to dbo"
+            ]
+        );
+        assert_eq!(
+            cells(
+                "2026-09-22 14:42:34.487 [main] INFO  liquibase.changelog - Reading resource: db/changelog/triggers/addendum-mut.sql"
+            ),
+            [
+                "2026-09-22 14:42:34.487",
+                "main",
+                "INFO",
+                "liquibase.changelog",
+                "Reading resource: db/changelog/triggers/addendum-mut.sql"
+            ]
+        );
+        // The layout the profile supported before, unchanged.
+        assert_eq!(
+            cells("2026-09-29 10:00:02,789 ERROR Failed to connect: timeout"),
+            [
+                "2026-09-29 10:00:02,789",
+                "",
+                "ERROR",
+                "",
+                "Failed to connect: timeout"
+            ]
+        );
+        assert_eq!(
+            cells("2026-09-29 10:00:01,123 [WARN] disk almost full"),
+            [
+                "2026-09-29 10:00:01,123",
+                "",
+                "WARN",
+                "",
+                "disk almost full"
+            ]
+        );
+        // Stack trace lines are continuation lines, not records.
+        assert!(p.parse("\tat com.example.Foo.bar(Foo.java:12)").is_none());
+        // The profile is picked for such content, whatever the file name.
+        for line in [
+            "2026-09-22 14:42:31.962 [main] INFO  liquibase.database - x",
+            "2026-09-29 10:00:02,789 ERROR x",
+        ] {
+            let got = set
+                .select(std::path::Path::new("app.out"), &[line])
+                .map(|p| p.name.as_str());
+            assert_eq!(got, Some("Java / log4j"), "{line}");
+        }
+    }
+
     #[test]
     fn access_log_profile_resolves_and_orders_by_alias() {
         let t = table(

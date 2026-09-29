@@ -1,13 +1,17 @@
-# log4j / logback / Python logging style: "2026-09-29 10:01:02,123 LEVEL ...".
+# log4j / Log4j 2 / logback / Python logging style, e.g.
+#   2026-09-29 10:01:02,123 INFO message                       (%d %-5p %m%n)
+#   2026-09-22 14:42:31.962 [main] INFO  app.Db - message      (%d [%t] %-5level %logger - %msg%n,
+#                                                               the Log4j 2 and logback default with a date)
+# The thread and logger columns are empty when a layout has none. Other
+# layouts: use parser = "log4j" with your own PatternLayout as `pattern`.
 name = "Java / log4j"
 match_files = ["*log4j*", "catalina*.out", "catalina*.log", "server.log", "application.log", "spring*.log"]
-match_content = '^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d[,.]\d+\s+\[?(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\b'
+match_content = '^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d[,.]\d+\s+(?:\[[^\]]*\]\s+)?\[?(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\b'
 
 [columns]
 parser = "regex"
-pattern = '^(?P<time>\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d[,.]\d+)\s+\[?(?P<level>TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\]?\s+(?P<message>.*)$'
-order = ["time", "level", "message"]
-multiline = "continuation"
+pattern = '^(?P<time>\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d[,.]\d+)\s+(?:\[(?P<thread>[^\]]*)\]\s+)?\[?(?P<level>TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\]?\s+(?:(?P<logger>[\w$]+(?:\.[\w$]+)*)\s+-\s+)?(?P<message>.*)$'
+order = ["time", "level", "thread", "logger", "message"]
 
 [timestamp]
 column = "time"

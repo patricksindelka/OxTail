@@ -299,6 +299,14 @@ fn text_log_candidates(lines: &[&str]) -> Vec<(ParserSpec, String, f32)> {
             "Log4j style (timestamp level [thread] logger - message)",
             0.97,
         ));
+        // Log4j 2 / logback default order: the thread comes before the level.
+        out.push(mk(
+            format!(
+                r"^\[?(?P<ts>{ts})\]?\s+\[(?P<thread>[^\]]*)\]\s+\[?(?P<level>{LEVELS})\]?\s+(?P<logger>[^\s\[\]:]+)\s+[-:]\s+(?P<msg>.*)$"
+            ),
+            "Log4j 2 / logback style (timestamp [thread] level logger - message)",
+            0.97,
+        ));
         out.push(mk(
             format!(r"^\[?(?P<level>{LEVELS})\]?\s+\[?(?P<ts>{ts})\]?\s+(?P<msg>.*)$"),
             "Level, timestamp, message",
@@ -440,6 +448,17 @@ mod tests {
             "2026-09-29 10:00:02,123 ERROR [worker-1] c.e.Db - failed",
         ];
         assert!(name(&l4j).starts_with("Log4j style"), "{}", name(&l4j));
+        // Reported by a user: Log4j 2 / logback default layout with a date.
+        let l4j2 = [
+            "2026-09-22 14:42:31.962 [main] INFO  liquibase.database - Set default schema name to dbo",
+            "2026-09-22 14:42:33.598 [main] INFO  liquibase.changelog - Reading from DATABASECHANGELOG",
+            "2026-09-22 14:42:34.487 [main] INFO  liquibase.changelog - Reading resource: db/changelog/triggers/addendum-mut.sql",
+        ];
+        assert!(
+            name(&l4j2).starts_with("Log4j 2 / logback style"),
+            "{}",
+            name(&l4j2)
+        );
     }
 
     #[test]

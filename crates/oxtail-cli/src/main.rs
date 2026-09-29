@@ -10,6 +10,7 @@
 mod args;
 mod ipc;
 mod logging;
+mod profile_name;
 mod renderer;
 
 use std::process::ExitCode;
@@ -50,7 +51,17 @@ fn run(cli: args::Cli) -> anyhow::Result<ExitCode> {
     if let Some(reason) = data_dir.in_memory_reason() {
         tracing::warn!("running without a data folder: {reason}");
     }
-    let request = cli.to_request().absolutized();
+    let mut request = cli.to_request().absolutized();
+    if let Some(input) = request.profile.clone() {
+        let cands = profile_name::candidates(data_dir.profiles_dir().as_deref());
+        match profile_name::resolve(&input, &cands) {
+            Ok(name) => request.profile = Some(name),
+            Err(e) => {
+                eprintln!("oxtail: {e}");
+                return Ok(ExitCode::from(2));
+            }
+        }
+    }
 
     // Single instance. Reading stdin means this process cannot be a mere
     // forwarder, so `-` implies a private instance.

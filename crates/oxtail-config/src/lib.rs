@@ -67,7 +67,7 @@ pub use datadir::{
 };
 pub use error::ConfigError;
 pub use glob::Glob;
-pub use profile::{Loaded, Profile, ProfileSet};
+pub use profile::{Loaded, Profile, ProfileSet, builtin_stems};
 pub use session::{
     Bookmark, LayoutNode, PathMapper, Session, SplitDirection, TabState, WindowGeometry,
 };

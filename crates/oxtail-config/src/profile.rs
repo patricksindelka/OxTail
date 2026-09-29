@@ -153,6 +153,20 @@ const BUILTIN: &[(&str, &str)] = &[
     ("generic", include_str!("../profiles/generic.toml")),
 ];
 
+/// The file stem and profile name of every built-in profile (for example
+/// `("nginx-access", "Nginx access")`), for resolving user input such as
+/// `--profile nginx-access`.
+pub fn builtin_stems() -> Vec<(String, String)> {
+    BUILTIN
+        .iter()
+        .filter_map(|(stem, text)| {
+            Profile::from_toml_str(text)
+                .ok()
+                .map(|p| ((*stem).to_string(), p.name))
+        })
+        .collect()
+}
+
 impl ProfileSet {
     /// Builds a set from profiles (`builtin` marks the origin, which decides
     /// precedence in [`select`](Self::select)). Invalid regexes are dropped

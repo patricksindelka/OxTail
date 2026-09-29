@@ -5,10 +5,10 @@ match_content = '^\S+ \S+ \S+ \[\d{1,2}/\w{3}/\d{4}:\d\d:\d\d:\d\d [+-]\d{4}\] "
 
 [columns]
 parser = "nginx_combined"
-order = ["remote_addr", "time_local", "request", "status", "body_bytes_sent", "*"]
+order = ["remote", "ts", "method", "path", "status", "size", "*"]
 
 [timestamp]
-column = "time_local"
+column = "ts"
 format = "apache"
 
 [[rules]]

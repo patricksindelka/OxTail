@@ -92,3 +92,31 @@ fn a_forced_renderer_is_tried_alone() {
     assert!(err.contains("glow"), "{err}");
     assert!(!err.contains("starting with the wgpu"), "{err}");
 }
+
+#[test]
+fn unknown_profile_is_an_error_that_lists_the_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = oxtail()
+        .arg("--data-dir")
+        .arg(dir.path())
+        .args(["--profile", "no-such-profile", "x.log"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let e = text(&out.stderr);
+    assert!(e.contains("unknown profile 'no-such-profile'"), "{e}");
+    assert!(e.contains("Nginx access") && e.contains("Syslog"), "{e}");
+}
+
+#[test]
+fn ambiguous_profile_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = oxtail()
+        .arg("--data-dir")
+        .arg(dir.path())
+        .args(["--profile", "access", "x.log"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).contains("ambiguous"));
+}
