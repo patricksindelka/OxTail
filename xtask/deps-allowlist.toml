@@ -59,6 +59,12 @@ allow = [
     "dxgi.dll",
     "d3dcompiler_47.dll",
     "api-ms-win-core-*.dll",
+    # COM/WinRT base, in System32 since Windows 8; used by the `windows` crate
+    # for desktop notifications (tauri-winrt-notification).
+    "combase.dll",
+    # UI Automation (screen readers), in System32 on every supported Windows;
+    # used by accesskit_windows for egui's accessibility support.
+    "uiautomationcore.dll",
 ]
 # A dynamic CRT means the binary was not built with `-C target-feature=+crt-static`.
 deny = [
