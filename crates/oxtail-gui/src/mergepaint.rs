@@ -82,7 +82,8 @@ pub fn show(ui: &mut Ui, id: Id, mv: &mut MergedView, env: &ViewEnv<'_>) {
         }
     }
     let (top, count) = mv.update_window();
-    let entries = mv.store.slice(top..top + count);
+    // (merged index, entry) of the rows shown: filtered rows in the filter view.
+    let entries = mv.entries_in(top..top + count);
     let max_h = (mv.max_text_w + PAD * 2.0 - text_w).max(0.0);
     mv.h_scroll = mv.h_scroll.clamp(0.0, max_h);
 
@@ -98,8 +99,8 @@ pub fn show(ui: &mut Ui, id: Id, mv: &mut MergedView, env: &ViewEnv<'_>) {
     let mut widest = mv.max_text_w;
     let selection = mv.selected_range();
     let current = mv.find.open.then_some(mv.find.current).flatten();
-    for (k, e) in entries.iter().enumerate() {
-        let index = top + k;
+    for (k, (index, e)) in entries.iter().enumerate() {
+        let index = *index;
         let y = full.top() + k as f32 * row_h;
         let row_rect = Rect::from_min_max(pos2(text_left, y), pos2(text_right, y + row_h));
         let line = mv.cache.get(&e.raw()).cloned();
@@ -173,7 +174,13 @@ pub fn show(ui: &mut Ui, id: Id, mv: &mut MergedView, env: &ViewEnv<'_>) {
 
     // ---- empty state
     if entries.is_empty() {
-        let msg = if mv.loading() {
+        let msg = if mv.filter_view_active() {
+            if mv.filter_progress().is_some_and(|(_, done)| done) {
+                "No lines match the filter"
+            } else {
+                "Filtering\u{2026}"
+            }
+        } else if mv.loading() {
             "Merging\u{2026}"
         } else {
             "No lines yet (waiting for data)"
@@ -190,7 +197,9 @@ pub fn show(ui: &mut Ui, id: Id, mv: &mut MergedView, env: &ViewEnv<'_>) {
     // ---- clicks
     let row_at = |p: egui::Pos2| -> Option<usize> {
         let k = ((p.y - full.top()) / row_h).floor();
-        (k >= 0.0 && (k as usize) < entries.len()).then(|| top + k as usize)
+        (k >= 0.0)
+            .then(|| entries.get(k as usize).map(|(i, _)| *i))
+            .flatten()
     };
     if let Some(p) = resp.interact_pointer_pos()
         && (resp.clicked() || resp.drag_started() || resp.dragged())
@@ -319,7 +328,7 @@ fn draw_vbar(
     painter: &egui::Painter,
 ) {
     painter.rect_filled(track, CornerRadius::ZERO, colors.gutter_bg);
-    let len = mv.len();
+    let len = mv.row_count();
     let space = ScrollSpace::Lines {
         total: len as u64,
         top: mv.top as u64,

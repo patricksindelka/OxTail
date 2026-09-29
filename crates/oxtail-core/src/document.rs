@@ -870,6 +870,27 @@ impl Document {
         (generation, lines)
     }
 
+    /// Synchronously reads the lines that start at the given byte offsets
+    /// (like [`LineRequest::AtOffsets`]): offsets at or past the end yield no
+    /// line and the result may be cut short by the response size limit, so
+    /// match lines to offsets by `Line::offset` and ask again for the rest.
+    /// The generation is captured before the read; if it changed while
+    /// reading, the lines are discarded (an empty `Ok`). A read error is
+    /// returned, not hidden as an empty answer. For worker threads only.
+    pub fn read_offsets_blocking_with_generation(
+        &self,
+        offsets: &[u64],
+    ) -> (u64, io::Result<Vec<Line>>) {
+        let generation = self.generation();
+        let lines = self
+            .shared
+            .read_request(&LineRequest::AtOffsets(offsets.to_vec()));
+        if self.generation() != generation {
+            return (generation, Ok(Vec::new()));
+        }
+        (generation, lines)
+    }
+
     /// Display name (file name or the name given at creation).
     pub fn display_name(&self) -> &str {
         &self.shared.name

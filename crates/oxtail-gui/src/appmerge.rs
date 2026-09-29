@@ -163,7 +163,14 @@ impl OxTailApp {
         };
         match result {
             Ok(sources) if !sources.is_empty() => {
-                let mv = MergedView::new(sources, tz, waker);
+                let paths: Vec<PathBuf> = sources.iter().filter_map(|s| s.path.clone()).collect();
+                let mut mv = MergedView::new(sources, tz, waker);
+                // A restored merged tab gets its filter back.
+                if let Some(def) = self.gui_state.merged.iter().find(|d| d.paths == paths)
+                    && !def.filters.is_empty()
+                {
+                    mv.filter.set_from_query_strings(&def.filters);
+                }
                 self.tabs[i].title = mv.title();
                 self.tabs[i].content = TabContent::Merged(Box::new(mv));
             }
@@ -187,6 +194,7 @@ impl OxTailApp {
             .filter_map(Tab::merged)
             .map(|m| crate::guistate::MergedDef {
                 paths: m.sources.iter().filter_map(|s| s.path.clone()).collect(),
+                filters: m.filter.to_query_strings(),
             })
             .filter(|d| d.paths.len() >= 2)
             .collect()
@@ -235,13 +243,8 @@ impl OxTailApp {
                 Some(t) => ctx.copy_text(t),
                 None => mv.toast("Nothing selected"),
             },
-            Action::SelectAll => {
-                let len = mv.len();
-                if len > 0 {
-                    mv.selection = Some((0, len - 1));
-                }
-            }
-            Action::Filter => mv.toast("Filtering is not available in merged views; use Find"),
+            Action::SelectAll => mv.select_all(),
+            Action::Filter => mv.toggle_filter_panel(),
             Action::GotoLine | Action::GotoTime => {
                 mv.toast("Go to line and time work in the single-file tabs");
             }
@@ -329,5 +332,45 @@ mod tests {
         a.merge_tabs(&ids);
         assert_eq!(a.merged_defs().len(), 1);
         assert_eq!(a.merged_defs()[0].paths.len(), 2);
+    }
+
+    #[test]
+    fn filters_are_saved_and_restored_with_the_merged_tab() {
+        let mut a = app();
+        let (pa, pb): (PathBuf, PathBuf) = ("/logs/a.log".into(), "/logs/b.log".into());
+        let src = |name: &str, p: &PathBuf| MergeSource {
+            name: name.into(),
+            doc: doc("2026-09-29 10:00:00 x\n"),
+            path: Some(p.clone()),
+            owns: false,
+        };
+        let id = a.open_merged(vec![src("a.log", &pa), src("b.log", &pb)]);
+        {
+            let m = a.tabs.iter_mut().find_map(Tab::merged_mut).unwrap();
+            m.filter.entries = vec![
+                crate::filter::FilterEntry::include("ERROR"),
+                crate::filter::FilterEntry {
+                    include: false,
+                    ..crate::filter::FilterEntry::include("health")
+                },
+            ];
+        }
+        let defs = a.merged_defs();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].filters, vec!["ERROR", "-health"]);
+        // A restored tab (opened from paths) picks its filter up.
+        a.close_tab(a.tabs.iter().position(|t| t.id == id).unwrap());
+        a.gui_state.merged = defs;
+        let id = a.open_merged_paths(vec![pa.clone(), pb.clone()]);
+        a.finish_merge_open(id, Ok(vec![src("a.log", &pa), src("b.log", &pb)]));
+        let m = a
+            .tabs
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap()
+            .merged()
+            .unwrap();
+        assert_eq!(m.filter.entries.len(), 2);
+        assert!(!m.filter.entries[1].include);
     }
 }

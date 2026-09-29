@@ -16,6 +16,7 @@ use oxtail_core::{Line, LineRequest};
 use oxtail_search::MatchSet;
 
 use crate::linecache::LineCache;
+use crate::sort::SortedOrder;
 
 /// Which rows the view shows.
 #[derive(Clone, Copy)]
@@ -29,6 +30,12 @@ pub enum RowSpace<'a> {
     Filtered {
         /// The lines to show.
         set: &'a MatchSet,
+    },
+    /// The lines of a filter view in the order of a column sort: rows are
+    /// neighbours by *position in the sorted order*, not by offset.
+    Sorted {
+        /// The sorted rows.
+        order: &'a SortedOrder,
     },
 }
 
@@ -52,6 +59,39 @@ impl RowSpace<'_> {
                 (n < *utf8_len).then_some(n)
             }
             RowSpace::Filtered { set } => set.next_after(line.offset),
+            RowSpace::Sorted { order } => order.next_after(line.offset),
+        }
+    }
+
+    /// The row after the one at `offset` in a filtered or sorted space
+    /// (`None` at the end, and for the full space, whose rows are found
+    /// through line lengths).
+    pub fn next_row(&self, offset: u64) -> Option<u64> {
+        match self {
+            RowSpace::Full { .. } => None,
+            RowSpace::Filtered { set } => set.next_after(offset),
+            RowSpace::Sorted { order } => order.next_after(offset),
+        }
+    }
+
+    /// The row before the one at `offset` in a filtered or sorted space.
+    pub fn prev_row(&self, offset: u64) -> Option<u64> {
+        match self {
+            RowSpace::Full { .. } => None,
+            RowSpace::Filtered { set } => set.prev_before(offset),
+            RowSpace::Sorted { order } => order.prev_before(offset),
+        }
+    }
+
+    /// The position of the row at `offset` among the rows of a filtered or
+    /// sorted space (`None` if it is not a row; the full space has no
+    /// position without line numbers). Binary searches, so bounded by the row
+    /// count.
+    pub fn position(&self, offset: u64) -> Option<usize> {
+        match self {
+            RowSpace::Full { .. } => None,
+            RowSpace::Filtered { set } => set.contains(offset).then(|| set.rank(offset)),
+            RowSpace::Sorted { order } => order.position(offset),
         }
     }
 
@@ -67,6 +107,10 @@ impl RowSpace<'_> {
                 Some(o) => Prev::At(o),
                 None => Prev::Start,
             },
+            RowSpace::Sorted { order } => match order.prev_before(offset) {
+                Some(o) => Prev::At(o),
+                None => Prev::Start,
+            },
         }
     }
 
@@ -75,6 +119,7 @@ impl RowSpace<'_> {
         match self {
             RowSpace::Full { utf8_len } => (*utf8_len > 0).then_some(0),
             RowSpace::Filtered { set } => set.get(0),
+            RowSpace::Sorted { order } => order.get(0),
         }
     }
 
@@ -84,6 +129,7 @@ impl RowSpace<'_> {
         match self {
             RowSpace::Full { .. } => None,
             RowSpace::Filtered { set } => set.len().checked_sub(1).and_then(|i| set.get(i)),
+            RowSpace::Sorted { order } => order.len().checked_sub(1).and_then(|i| order.get(i)),
         }
     }
 }
@@ -219,9 +265,8 @@ pub fn tail_position(
 ) -> Option<Pos> {
     let last = match space {
         RowSpace::Full { utf8_len } => Arc::clone(cache.last_line_ending_at(*utf8_len)?),
-        RowSpace::Filtered { set } => {
-            let o = set.len().checked_sub(1).and_then(|i| set.get(i))?;
-            Arc::clone(cache.get(o)?)
+        RowSpace::Filtered { .. } | RowSpace::Sorted { .. } => {
+            Arc::clone(cache.get(space.last_start()?)?)
         }
     };
     let mut acc = height_of(&last).max(1.0);
@@ -469,7 +514,7 @@ pub fn plan_fetch(
                 }
             }
         }
-        RowSpace::Filtered { set } => {
+        RowSpace::Filtered { .. } | RowSpace::Sorted { .. } => {
             let mut missing = Vec::new();
             let mut collect = |o: u64| {
                 if cache.get(o).is_none() && !missing.contains(&o) {
@@ -481,12 +526,12 @@ pub fn plan_fetch(
             for _ in 0..want_after {
                 let Some(o) = at else { break };
                 collect(o);
-                at = set.next_after(o);
+                at = space.next_row(o);
             }
             // Backward.
             let mut at = pos.top;
             for _ in 0..want_before {
-                match set.prev_before(at) {
+                match space.prev_row(at) {
                     Some(o) => {
                         collect(o);
                         at = o;
@@ -793,6 +838,71 @@ mod tests {
         let t = tail_position(&space, &c, 15.0, &h).unwrap();
         assert_eq!(t.top, 5 * W);
         assert_eq!(t.sub_px, 5.0);
+    }
+
+    /// Rows at lines 9, 2, 5 (in that display order) of a 20-line cache.
+    fn sorted_order() -> SortedOrder {
+        SortedOrder::new(vec![9 * W, 2 * W, 5 * W])
+    }
+
+    #[test]
+    fn sorted_rows_follow_the_display_order_not_the_offsets() {
+        let order = sorted_order();
+        let space = RowSpace::Sorted { order: &order };
+        let c = cache(0, 20);
+        // First, last, next and previous by position.
+        assert_eq!(space.first_start(), Some(9 * W));
+        assert_eq!(space.last_start(), Some(5 * W));
+        let line = |n: u64| c.get(n * W).unwrap().clone();
+        assert_eq!(space.next_start(&line(9)), Some(2 * W));
+        assert_eq!(space.next_start(&line(2)), Some(5 * W));
+        assert_eq!(space.next_start(&line(5)), None);
+        assert_eq!(space.prev_start(&c, 5 * W), Prev::At(2 * W));
+        assert_eq!(space.prev_start(&c, 9 * W), Prev::Start);
+        // Positions are found by offset; unknown offsets are not rows.
+        assert_eq!(space.position(2 * W), Some(1));
+        assert_eq!(space.position(3 * W), None);
+        assert_eq!(space.next_row(2 * W), Some(5 * W));
+        assert_eq!(space.prev_row(2 * W), Some(9 * W));
+        // Layout, scrolling and the tail walk the sorted order.
+        let v = layout_rows(&Pos::at(9 * W), &space, &c, 100.0, &h);
+        let numbers: Vec<u64> = v.rows.iter().map(|r| r.line.number).collect();
+        assert_eq!(numbers, vec![9, 2, 5]);
+        assert!(v.reaches_end);
+        let mut p = Pos::at(9 * W);
+        scroll_by(&mut p, 10.0, &space, &c, &h);
+        assert_eq!(p.top, 2 * W);
+        scroll_by(&mut p, 1000.0, &space, &c, &h);
+        assert_eq!(p.top, 5 * W);
+        scroll_by(&mut p, -10.0, &space, &c, &h);
+        assert_eq!(p.top, 2 * W);
+        let t = tail_position(&space, &c, 15.0, &h).unwrap();
+        assert_eq!(t.top, 2 * W);
+        assert_eq!(t.sub_px, 5.0);
+    }
+
+    #[test]
+    fn sorted_plan_reads_the_neighbours_in_display_order() {
+        // Display order: lines 400, 3, 200 and then 100 more in file order.
+        let mut offs = vec![400 * W, 3 * W, 200 * W];
+        offs.extend((10..110).map(|i| i * W));
+        let order = SortedOrder::new(offs);
+        let space = RowSpace::Sorted { order: &order };
+        let mut c = LineCache::new(0, 10_000);
+        c.insert(0, synthetic(400, 1, W));
+        let p = Pos::at(400 * W);
+        let v = layout_rows(&p, &space, &c, 100.0, &h);
+        assert_eq!(v.missing_next, Some(3 * W));
+        let plan = plan_fetch(&p, &v, &space, &c, 10, &|_| false);
+        assert_eq!(plan.len(), 1);
+        match &plan[0] {
+            Fetch::Offsets(o) => {
+                assert!(o.contains(&(3 * W)) && o.contains(&(200 * W)));
+                assert!(!o.contains(&(400 * W)));
+                assert_eq!(o.len(), 10 + OVERSCAN_ROWS - 1);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -24,8 +24,9 @@
 //! | [`structure`], [`colspec`], [`chooser`], [`guistate`] | Which parser a tab uses (profile, detection, choice), profile table adapters, the parser chooser, remembered choices |
 //! | [`collayout`], [`table`], [`tablepaint`], [`colui`], [`detail`] | The column table: layout maths, header, cells, suggestion bar and windows, the detail pane |
 //! | [`qfilter`], [`stats`], [`export`], [`docscan`] | Column queries as filters, statistics, CSV/JSON Lines export, the scanner they share |
+//! | [`sort`] | Sorting a filtered view by a column: background job, sorted row order |
 //! | [`timeview`], [`gototime`] | Relative time and gap separators, go to time |
-//! | [`merge`], [`mergeview`], [`mergepaint`], [`appmerge`] | Merged tabs: builder, virtual list, painting, opening |
+//! | [`merge`], [`mergefilter`], [`mergeview`], [`mergepaint`], [`appmerge`] | Merged tabs: builder, filter worker, virtual list, painting, opening |
 //! | [`panes`], [`appsplit`], [`panesui`], [`cross`] | Split layout tree, pane state, tab strips and pane drawing, search across tabs |
 //!
 //! # Row identity
@@ -77,6 +78,7 @@ pub mod keymap;
 pub mod linecache;
 pub mod logview;
 pub mod merge;
+pub mod mergefilter;
 pub mod mergepaint;
 pub mod mergeview;
 pub mod minimap;
@@ -89,6 +91,7 @@ pub mod request;
 pub mod ruleeditor;
 pub mod rules;
 pub mod scroll;
+pub mod sort;
 pub mod startup;
 pub mod stats;
 pub mod structure;

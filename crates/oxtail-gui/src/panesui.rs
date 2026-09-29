@@ -16,6 +16,7 @@ use crate::cross::CrossTarget;
 use crate::logview::ViewEnv;
 use crate::mergepaint::{self, badge_color};
 use crate::mergeview::{MergedView, badge_letter};
+use crate::panels::{FilterPanelOptions, filter_panel_ui};
 use crate::panes::{Edge, PaneId, edge_at, extent_of, ratio_at};
 use crate::tab::{TabContent, drop_index, move_item};
 use crate::util::{fmt_bytes, fmt_count};
@@ -443,6 +444,21 @@ impl OxTailApp {
         let TabContent::Merged(mv) = &mut tab.content else {
             return;
         };
+        if mv.filter.open {
+            egui::Panel::top(Id::new(("mfilter", tab_id))).show(ui, |ui| {
+                let opts = FilterPanelOptions {
+                    has_hide: false,
+                    queries: false,
+                    context: false,
+                    summary: mv.filter_progress().map(|(n, done)| (n as u64, done)),
+                };
+                if let Some(enabled) =
+                    filter_panel_ui(ui, tab_id, &mut mv.filter, &opts, &colors, now)
+                {
+                    mv.set_filter_view(enabled);
+                }
+            });
+        }
         if mv.find.open {
             egui::Panel::top(Id::new(("mfind", tab_id))).show(ui, |ui| {
                 merged_find_bar(ui, tab_id, mv, now);
@@ -823,9 +839,14 @@ fn merged_find_bar(ui: &mut Ui, tab_id: u64, mv: &mut MergedView, now: Instant) 
                 ui.spinner();
             }
             ui.label(format!(
-                "{}{} matches",
+                "{}{} matches{}",
                 if scanning { "\u{2265} " } else { "" },
-                fmt_count(s.count() as u64)
+                fmt_count(s.count() as u64),
+                if mv.filter_view_active() {
+                    " (all lines; hidden ones are skipped)"
+                } else {
+                    ""
+                }
             ));
         }
         if ui.button("\u{d7}").on_hover_text("Close (Esc)").clicked() {
@@ -863,12 +884,26 @@ fn merged_status(ui: &mut Ui, mv: &mut MergedView) {
             ui.label(format!("{} ({})", s.name, fmt_count(lines)));
         }
         ui.separator();
-        ui.label(format!("{} merged lines", fmt_count(mv.len() as u64)))
-            .on_hover_text(format!(
-                "{} bytes per merged line: the merged order takes {}",
-                MergedView::BYTES_PER_LINE,
-                fmt_bytes(mv.store.bytes() as u64)
-            ));
+        let count_label = match mv.filter_progress() {
+            Some((n, done)) => format!(
+                "{} of {} lines{}",
+                fmt_count(n as u64),
+                fmt_count(mv.len() as u64),
+                if mv.filter_truncated() {
+                    " (too many lines: the rest is not filtered)"
+                } else if done {
+                    ""
+                } else {
+                    " so far"
+                }
+            ),
+            None => format!("{} merged lines", fmt_count(mv.len() as u64)),
+        };
+        ui.label(count_label).on_hover_text(format!(
+            "{} bytes per merged line: the merged order takes {}",
+            MergedView::BYTES_PER_LINE,
+            fmt_bytes(mv.store.bytes() as u64)
+        ));
         ui.label(RichText::new(fmt_bytes(mv.store.bytes() as u64)).weak());
         if mv.loading() {
             ui.spinner();

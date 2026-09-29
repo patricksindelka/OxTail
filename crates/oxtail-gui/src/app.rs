@@ -924,6 +924,7 @@ impl OxTailApp {
         let notify = self.settings.notifications_enabled;
         let mut copied: Option<String> = None;
         let tz = self.settings.timezone.clone();
+        let sort_max_rows = self.settings.sort_max_rows;
         let wake = self.waker();
         for i in 0..self.tabs.len() {
             let tab = &mut self.tabs[i];
@@ -943,6 +944,7 @@ impl OxTailApp {
             }
             let Some(view) = tab.view_mut() else { continue };
             view.set_time_zone(&tz);
+            view.sort.max_rows = sort_max_rows;
             let out = view.pump(now);
             if view.st.dirty {
                 view.st.dirty = false;

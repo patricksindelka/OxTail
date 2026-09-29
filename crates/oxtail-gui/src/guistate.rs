@@ -40,6 +40,9 @@ pub struct SavedStructure {
 pub struct MergedDef {
     /// The merged files, in source order.
     pub paths: Vec<PathBuf>,
+    /// The filter entries of the tab, in the query grammar of
+    /// [`crate::filter`].
+    pub filters: Vec<String>,
 }
 
 /// The pane layout: a tree of panes, and which pane each session tab is in.
@@ -125,6 +128,7 @@ mod tests {
         s.set_structure(Path::new("/b.log"), SavedStructure::default());
         s.merged.push(MergedDef {
             paths: vec!["/a.log".into(), "/b.log".into()],
+            filters: vec!["ERROR".into(), "-health".into()],
         });
         let back = GuiState::parse(&s.to_bytes());
         assert_eq!(back.structures, s.structures);

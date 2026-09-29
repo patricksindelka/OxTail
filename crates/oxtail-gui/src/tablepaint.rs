@@ -1,9 +1,10 @@
 //! Painting the rows of the column table (the header lives in
 //! [`crate::table`]).
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
-use egui::{FontId, Rect, pos2};
+use egui::{FontId, Galley, Rect, pos2};
 use oxtail_columns::ColumnKind;
 use oxtail_core::Line;
 use oxtail_highlight::{Style, StyledSpan};
@@ -19,6 +20,22 @@ use crate::table::{
 };
 use crate::text::clean_ranges;
 
+/// How the table wraps long text (Alt+Z): the stretching ("fill") column's
+/// cell wraps at its width and the row grows; a continuation line wraps at
+/// the full width. Every other cell stays on one line.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WrapSpec {
+    /// The schema column that wraps.
+    pub fill: usize,
+    /// Whether that column holds plain text (other kinds are short and are
+    /// formatted for display, so they are never wrapped).
+    pub fill_is_text: bool,
+    /// Text width of the fill cell in pixels (its column minus padding).
+    pub cell_w: f32,
+    /// Text width of a continuation line in pixels.
+    pub cont_w: f32,
+}
+
 /// Everything needed to paint one table row.
 pub struct TableRow<'a> {
     /// The egui context (for laying out text).
@@ -29,8 +46,10 @@ pub struct TableRow<'a> {
     pub colors: &'a Colors,
     /// Monospace font.
     pub font: &'a FontId,
-    /// Row height.
+    /// Height of one text line.
     pub row_h: f32,
+    /// Height of this row (taller than `row_h` when its text wraps).
+    pub height: f32,
     /// Width of one character.
     pub char_w: f32,
     /// Top of the row.
@@ -45,10 +64,157 @@ pub struct TableRow<'a> {
     pub prepared: &'a Prepared,
     /// The line.
     pub line: &'a Line,
-    /// What the cell appearance depends on.
+    /// What the cell appearance depends on (with the wrap width when the row
+    /// wraps).
     pub key: CellKey,
     /// Search matcher, painted into cells.
     pub matcher: Option<&'a Arc<Matcher>>,
+    /// The wrapping, when it is on.
+    pub wrap: Option<WrapSpec>,
+    /// Cache of wrapped galleys (shared with the row-height measurement).
+    pub wrap_cache: &'a RefCell<TableCache>,
+}
+
+/// The laid-out (dimmed) text of a continuation line.
+fn continuation_galley(
+    ctx: &egui::Context,
+    colors: &Colors,
+    font: &FontId,
+    row_h: f32,
+    prepared: &Prepared,
+    key: CellKey,
+    wrap: Option<f32>,
+) -> Arc<Galley> {
+    let text = prepared.text.as_str();
+    let line_style: Option<Style> = prepared.hl.line_style.map(|s| Style { bg: None, ..s });
+    let layer = whole(line_style, text.len());
+    layout_cell(
+        ctx,
+        colors,
+        font,
+        row_h,
+        &CellText {
+            text,
+            layers: &[&layer, &prepared.ansi, &prepared.hl.spans],
+            search: &[],
+            current: key.current,
+            dimmed: true,
+            wrap,
+        },
+    )
+}
+
+/// The laid-out text of column `col` of a record: `display` is what the cell
+/// shows (formatted by the structure), `rec` supplies its highlights.
+#[allow(clippy::too_many_arguments)]
+fn cell_galley(
+    ctx: &egui::Context,
+    colors: &Colors,
+    font: &FontId,
+    row_h: f32,
+    prepared: &Prepared,
+    rec: &oxtail_columns::Record<'_>,
+    col: usize,
+    display: &str,
+    key: CellKey,
+    matcher: Option<&Arc<Matcher>>,
+    wrap: Option<f32>,
+) -> Arc<Galley> {
+    let line_style: Option<Style> = prepared.hl.line_style.map(|s| Style { bg: None, ..s });
+    let span = rec.span(col);
+    let verbatim = span
+        .clone()
+        .filter(|s| prepared.text.get(s.clone()) == Some(display));
+    let (hl_sub, ansi_sub) = match &verbatim {
+        Some(s) => (
+            spans_in_cell(&prepared.hl.spans, s),
+            spans_in_cell(&prepared.ansi, s),
+        ),
+        None => (
+            span.as_ref()
+                .and_then(|s| covering_style(&prepared.hl.spans, s))
+                .map(|style| whole(Some(style), display.len()))
+                .unwrap_or_default(),
+            Vec::new(),
+        ),
+    };
+    let layer = whole(line_style, display.len());
+    let search = match matcher {
+        Some(m) => clean_ranges(display, m.find_iter(display.as_bytes())),
+        None => Vec::new(),
+    };
+    layout_cell(
+        ctx,
+        colors,
+        font,
+        row_h,
+        &CellText {
+            text: display,
+            layers: &[&layer, &ansi_sub, &hl_sub],
+            search: &search,
+            current: key.current,
+            dimmed: key.dimmed,
+            wrap,
+        },
+    )
+}
+
+/// The height of a table row that wraps: the taller of the wrapped fill cell
+/// and one text line (a continuation line wraps as a whole). The galleys go
+/// into `cache`, where painting finds them again.
+#[allow(clippy::too_many_arguments)]
+pub fn wrapped_row_height(
+    ctx: &egui::Context,
+    colors: &Colors,
+    font: &FontId,
+    row_h: f32,
+    cache: &mut TableCache,
+    line: &Line,
+    prepared: &Prepared,
+    spec: &WrapSpec,
+    key: CellKey,
+    matcher: Option<&Arc<Matcher>>,
+) -> f32 {
+    let g = match &prepared.record {
+        None => match cache.get(line.offset, CONTINUATION, key) {
+            Some(g) => g,
+            None => {
+                let g =
+                    continuation_galley(ctx, colors, font, row_h, prepared, key, Some(spec.cont_w));
+                cache.put(line.offset, CONTINUATION, key, Arc::clone(&g));
+                g
+            }
+        },
+        Some(rec) => {
+            if !spec.fill_is_text {
+                return row_h;
+            }
+            match cache.get(line.offset, spec.fill, key) {
+                Some(g) => g,
+                None => {
+                    let Some(display) = rec.get(spec.fill).filter(|d| !d.is_empty()) else {
+                        return row_h;
+                    };
+                    let g = cell_galley(
+                        ctx,
+                        colors,
+                        font,
+                        row_h,
+                        prepared,
+                        rec,
+                        spec.fill,
+                        display,
+                        key,
+                        matcher,
+                        Some(spec.cell_w),
+                    );
+                    cache.put(line.offset, spec.fill, key, Arc::clone(&g));
+                    g
+                }
+            }
+        }
+    };
+    g.size().y.max(row_h)
 }
 
 /// Paints the cells of one record row, or the spanning text of a
@@ -60,33 +226,39 @@ pub fn paint_table_row(r: &TableRow<'_>, cache: &mut TableCache, painter: &egui:
     let h_scroll = r.view.h_scroll;
     let row_rect = Rect::from_min_max(
         pos2(r.text_rect.left(), r.y),
-        pos2(r.text_rect.right(), r.y + r.row_h),
+        pos2(r.text_rect.right(), r.y + r.height),
     );
     let prepared = r.prepared;
-    let line_style: Option<Style> = prepared.hl.line_style.map(|s| Style { bg: None, ..s });
     let Some(rec) = &prepared.record else {
         // A continuation line spans all columns: indented and dimmed.
-        let galley = cache
-            .get(r.line.offset, CONTINUATION, r.key)
-            .unwrap_or_else(|| {
-                let text = prepared.text.as_str();
-                let layer = whole(line_style, text.len());
-                let g = layout_cell(
-                    r.ctx,
-                    r.colors,
-                    r.font,
-                    r.row_h,
-                    &CellText {
-                        text,
-                        layers: &[&layer, &prepared.ansi, &prepared.hl.spans],
-                        search: &[],
-                        current: r.key.current,
-                        dimmed: true,
-                    },
-                );
-                cache.put(r.line.offset, CONTINUATION, r.key, Arc::clone(&g));
-                g
-            });
+        let galley = match r.wrap {
+            Some(spec) => {
+                let mut c = r.wrap_cache.borrow_mut();
+                c.get(r.line.offset, CONTINUATION, r.key)
+                    .unwrap_or_else(|| {
+                        let g = continuation_galley(
+                            r.ctx,
+                            r.colors,
+                            r.font,
+                            r.row_h,
+                            prepared,
+                            r.key,
+                            Some(spec.cont_w),
+                        );
+                        c.put(r.line.offset, CONTINUATION, r.key, Arc::clone(&g));
+                        g
+                    })
+            }
+            None => cache
+                .get(r.line.offset, CONTINUATION, r.key)
+                .unwrap_or_else(|| {
+                    let g = continuation_galley(
+                        r.ctx, r.colors, r.font, r.row_h, prepared, r.key, None,
+                    );
+                    cache.put(r.line.offset, CONTINUATION, r.key, Arc::clone(&g));
+                    g
+                }),
+        };
         painter.with_clip_rect(row_rect).galley(
             pos2(text_left + CELL_PAD + 2.0 * r.char_w - h_scroll, r.y),
             galley,
@@ -99,57 +271,57 @@ pub fn paint_table_row(r: &TableRow<'_>, cache: &mut TableCache, painter: &egui:
     let pinned_clip = Rect::from_min_max(row_rect.min, pos2(split, row_rect.bottom()));
     for p in r.placements {
         let x0 = text_left + p.x - if p.pinned { 0.0 } else { h_scroll };
-        let cell = Rect::from_min_max(pos2(x0, r.y), pos2(x0 + p.w, r.y + r.row_h));
+        let cell = Rect::from_min_max(pos2(x0, r.y), pos2(x0 + p.w, r.y + r.height));
         let clip = if p.pinned { pinned_clip } else { scroll_clip };
         let visible = cell.intersect(clip);
         if visible.width() <= 1.0 {
             continue;
         }
-        let galley = match cache.get(r.line.offset, p.col, r.key) {
-            Some(g) => g,
-            None => {
-                let display = st.cell_text(p.col, rec);
-                if display.is_empty() {
-                    continue;
+        let wrapped = r.wrap.filter(|w| w.fill == p.col && w.fill_is_text);
+        let display_of = || st.cell_text(p.col, rec);
+        let galley = match wrapped {
+            Some(spec) => {
+                let mut c = r.wrap_cache.borrow_mut();
+                match c.get(r.line.offset, p.col, r.key) {
+                    Some(g) => g,
+                    None => {
+                        let display = display_of();
+                        if display.is_empty() {
+                            continue;
+                        }
+                        let g = cell_galley(
+                            r.ctx,
+                            r.colors,
+                            r.font,
+                            r.row_h,
+                            prepared,
+                            rec,
+                            p.col,
+                            &display,
+                            r.key,
+                            r.matcher,
+                            Some(spec.cell_w),
+                        );
+                        c.put(r.line.offset, p.col, r.key, Arc::clone(&g));
+                        g
+                    }
                 }
-                let span = rec.span(p.col);
-                let verbatim = span
-                    .clone()
-                    .filter(|s| prepared.text.get(s.clone()) == Some(display.as_str()));
-                let (hl_sub, ansi_sub) = match &verbatim {
-                    Some(s) => (
-                        spans_in_cell(&prepared.hl.spans, s),
-                        spans_in_cell(&prepared.ansi, s),
-                    ),
-                    None => (
-                        span.as_ref()
-                            .and_then(|s| covering_style(&prepared.hl.spans, s))
-                            .map(|style| whole(Some(style), display.len()))
-                            .unwrap_or_default(),
-                        Vec::new(),
-                    ),
-                };
-                let layer = whole(line_style, display.len());
-                let search = match r.matcher {
-                    Some(m) => clean_ranges(&display, m.find_iter(display.as_bytes())),
-                    None => Vec::new(),
-                };
-                let g = layout_cell(
-                    r.ctx,
-                    r.colors,
-                    r.font,
-                    r.row_h,
-                    &CellText {
-                        text: &display,
-                        layers: &[&layer, &ansi_sub, &hl_sub],
-                        search: &search,
-                        current: r.key.current,
-                        dimmed: r.key.dimmed,
-                    },
-                );
-                cache.put(r.line.offset, p.col, r.key, Arc::clone(&g));
-                g
             }
+            None => match cache.get(r.line.offset, p.col, r.key) {
+                Some(g) => g,
+                None => {
+                    let display = display_of();
+                    if display.is_empty() {
+                        continue;
+                    }
+                    let g = cell_galley(
+                        r.ctx, r.colors, r.font, r.row_h, prepared, rec, p.col, &display, r.key,
+                        r.matcher, None,
+                    );
+                    cache.put(r.line.offset, p.col, r.key, Arc::clone(&g));
+                    g
+                }
+            },
         };
         let kind = parser
             .schema()

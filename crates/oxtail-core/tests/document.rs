@@ -102,6 +102,8 @@ fn range_tail_offsets_and_fraction() {
     // Blocking helpers.
     assert_eq!(doc.read_lines_blocking(10, 1)[0].text, "line 10");
     assert_eq!(doc.offset_of_line(10).unwrap(), Some(70));
+    let (_, by_offset) = doc.read_offsets_blocking_with_generation(&[70, u64::MAX]);
+    assert_eq!(texts(&by_offset.unwrap()), ["line 10"]);
     assert_eq!(doc.offset_of_line(5000).unwrap(), None);
     let p = doc.line_of_offset(r[1].offset + 2).unwrap();
     assert_eq!((p.line, p.exact, p.start), (501, true, r[1].offset));

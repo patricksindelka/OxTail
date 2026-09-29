@@ -134,6 +134,11 @@ pub struct Settings {
     pub renderer: Renderer,
     /// How many recent files to remember.
     pub recent_files_limit: usize,
+    /// Largest filtered view (in rows) that can be sorted by a column.
+    /// Sorting reads every row of the view on a worker thread, so it is only
+    /// offered up to this size (PLAN.md section 8.3). Absent in old files: the
+    /// default applies.
+    pub sort_max_rows: u64,
 }
 
 impl Default for Settings {
@@ -159,6 +164,7 @@ impl Default for Settings {
             update_check: false,
             renderer: Renderer::Auto,
             recent_files_limit: 20,
+            sort_max_rows: 1_000_000,
         }
     }
 }
@@ -189,6 +195,7 @@ impl Settings {
         self.follow_poll_interval_ms = self.follow_poll_interval_ms.clamp(20, 60_000);
         self.cache_size_mb = self.cache_size_mb.clamp(4, 65_536);
         self.recent_files_limit = self.recent_files_limit.min(500);
+        self.sort_max_rows = self.sort_max_rows.min(10_000_000);
         if !self.time_gap_threshold_secs.is_finite() || self.time_gap_threshold_secs < 0.0 {
             self.time_gap_threshold_secs = 0.0;
         }
@@ -428,6 +435,17 @@ mod tests {
         assert_eq!(s.follow_poll_interval_ms, 20);
         assert_eq!(s.cache_size_mb, 4);
         assert_eq!(s.line_height, 1.25);
+    }
+
+    #[test]
+    fn sort_limit_defaults_when_absent_and_is_clamped() {
+        let (s, w) = Settings::from_toml_str("font_size = 14.0\n", &DataMode::Portable);
+        assert_eq!(w, None);
+        assert_eq!(s.sort_max_rows, 1_000_000);
+        let (s, _) = Settings::from_toml_str("sort_max_rows = 5000\n", &DataMode::Portable);
+        assert_eq!(s.sort_max_rows, 5000);
+        let (s, _) = Settings::from_toml_str("sort_max_rows = 99999999999\n", &DataMode::Portable);
+        assert_eq!(s.sort_max_rows, 10_000_000);
     }
 
     #[test]

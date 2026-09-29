@@ -28,6 +28,7 @@ use crate::linecache::{DEFAULT_CAPACITY, LineCache};
 use crate::scroll::{
     Fetch, OVERSCAN_ROWS, Pos, RowSpace, Visible, layout_rows, plan_fetch, scroll_by, tail_position,
 };
+use crate::sort::{SortChoice, SortSpec, SortState, SortedOrder, TickInput};
 use crate::structure::{Structure, StructureInput, StructureResult};
 use crate::table::TableCache;
 use crate::timeview::{RelMode, TimeCache};
@@ -103,6 +104,38 @@ impl Selection {
     pub fn contains(&self, offset: u64) -> bool {
         let (lo, hi) = self.bounds();
         lo.offset <= offset && offset <= hi.offset
+    }
+}
+
+/// Tests whether a line is selected, in the current row order: a range of
+/// offsets in file order, or a range of positions in a sorted view.
+#[derive(Clone)]
+pub enum SelTest {
+    /// Nothing is selected.
+    None,
+    /// The lines between two offsets (file order).
+    Offsets(Selection),
+    /// The rows between two positions of a sorted view.
+    Positions {
+        /// The sorted rows.
+        order: Arc<SortedOrder>,
+        /// First selected position.
+        lo: usize,
+        /// Last selected position.
+        hi: usize,
+    },
+}
+
+impl SelTest {
+    /// Whether the line starting at `offset` is selected.
+    pub fn contains(&self, offset: u64) -> bool {
+        match self {
+            SelTest::None => false,
+            SelTest::Offsets(s) => s.contains(offset),
+            SelTest::Positions { order, lo, hi } => {
+                order.position(offset).is_some_and(|p| *lo <= p && p <= *hi)
+            }
+        }
     }
 }
 
@@ -253,6 +286,8 @@ pub struct DocView {
     pub find: FindState,
     /// Filter state.
     pub filter: FilterState,
+    /// Sorting of the filtered view by a column.
+    pub sort: SortState,
     /// Highlighting state.
     pub hl: Rc<RefCell<HighlightState>>,
     /// Cache of laid-out lines, shared with the painting code (which also
@@ -268,12 +303,31 @@ pub struct DocView {
     pub metrics: Metrics,
     /// Rows drawn in the last frame (for tests and status).
     pub last_rows: Vec<Arc<Line>>,
+    /// Header cells drawn in the last frame as `(schema column, screen
+    /// rectangle)`; empty outside the table view (for tests).
+    pub header_cells: Vec<(usize, egui::Rect)>,
     /// The scrollbar thumb is being dragged at this position.
     pub thumb_drag: Option<f64>,
     /// Column structure: parser, table view, layout, time parser.
     pub st: Structure,
     /// Laid-out table cells.
     pub tcache: TableCache,
+    /// Laid-out table cells that wrap (kept apart because the row heights
+    /// are measured while the view is borrowed, so the cache is shared).
+    pub wrap_cells: Rc<RefCell<TableCache>>,
+    /// Widest text seen in the table's fill column, in characters (grows
+    /// only; reset with the layout). Makes the table as wide as its content.
+    pub fill_chars: f32,
+    /// Widest continuation line seen in the table, in characters.
+    pub cont_chars: f32,
+    /// The "lines are cut off" hint was dismissed (once per tab).
+    pub cut_hint_dismissed: bool,
+    /// Heights of the rows drawn in the last frame (taller than one text line
+    /// when they wrap).
+    pub last_heights: Vec<f32>,
+    /// The horizontal scrollbar's track as drawn in the last frame (`None`
+    /// when there is nothing to scroll to).
+    pub hbar_rect: Option<egui::Rect>,
     /// The time zone setting the structure was built with.
     pub tz_setting: TimezoneSetting,
     /// The detail pane (selected record as key/value list) is open.
@@ -308,6 +362,9 @@ pub struct DocView {
     /// The view wants another frame after this long (rate-limited reads).
     pub repaint_after: Option<Duration>,
     was_exact: bool,
+    /// Position of the top row in the sorted order when it was last seen (to
+    /// stay near it when a re-sort drops that row).
+    sort_top_hint: usize,
     /// Next line number the alert scan has not looked at (`None` until the
     /// initial index is complete).
     pub alert_next: Option<u64>,
@@ -335,6 +392,7 @@ impl DocView {
             toast: None,
             find: FindState::default(),
             filter: FilterState::default(),
+            sort: SortState::default(),
             hl: Rc::new(RefCell::new(HighlightState::with_defaults())),
             galleys: Rc::new(RefCell::new(crate::logview::GalleyCache::default())),
             max_text_w: 0.0,
@@ -345,9 +403,16 @@ impl DocView {
                 row_h: 16.0,
             },
             last_rows: Vec::new(),
+            header_cells: Vec::new(),
             thumb_drag: None,
             st: Structure::new(),
             tcache: TableCache::default(),
+            wrap_cells: Rc::new(RefCell::new(TableCache::default())),
+            fill_chars: 0.0,
+            cont_chars: 0.0,
+            cut_hint_dismissed: false,
+            last_heights: Vec::new(),
+            hbar_rect: None,
             tz_setting: TimezoneSetting::default(),
             detail_open: false,
             stats: crate::stats::StatsState::default(),
@@ -372,6 +437,7 @@ impl DocView {
             last_tail: None,
             repaint_after: None,
             was_exact: false,
+            sort_top_hint: 0,
             alert_next: None,
         }
     }
@@ -398,10 +464,19 @@ impl DocView {
     pub fn structure_changed(&mut self, parser: Option<Arc<oxtail_columns::Parser>>) {
         self.hl.borrow_mut().set_parser(parser);
         self.galleys.borrow_mut().clear();
-        self.tcache.clear();
+        self.clear_table_caches();
         self.time_cache.borrow_mut().clear();
-        self.max_text_w = 0.0;
+        // The width of plain text does not depend on the parser: keep it, so
+        // the horizontal bar does not blink when the structure arrives late.
+        if self.table_active() {
+            self.reset_widths();
+        } else {
+            self.fill_chars = 0.0;
+            self.cont_chars = 0.0;
+        }
         self.filter.set_columns(self.st.query_context());
+        // Another parser means other columns: the sort no longer applies.
+        self.sort.clear();
     }
 
     /// Accepts the pending structure suggestion (parser plus table view).
@@ -429,11 +504,25 @@ impl DocView {
         self.structure_changed(None);
     }
 
+    /// Forgets the measured content widths (after a change of parser,
+    /// columns, table mode or generation).
+    pub fn reset_widths(&mut self) {
+        self.max_text_w = 0.0;
+        self.fill_chars = 0.0;
+        self.cont_chars = 0.0;
+    }
+
+    /// Drops every laid-out table cell.
+    pub fn clear_table_caches(&mut self) {
+        self.tcache.clear();
+        self.wrap_cells.borrow_mut().clear();
+    }
+
     /// Shows or hides the table view.
     pub fn set_table(&mut self, on: bool) {
         self.st.set_table(on);
-        self.tcache.clear();
-        self.max_text_w = 0.0;
+        self.clear_table_caches();
+        self.reset_widths();
         self.h_scroll = 0.0;
     }
 
@@ -447,7 +536,7 @@ impl DocView {
         if &self.tz_setting != tz {
             self.tz_setting = tz.clone();
             self.st.set_zone(tz);
-            self.tcache.clear();
+            self.clear_table_caches();
             self.time_cache.borrow_mut().clear();
             self.galleys.borrow_mut().clear();
             self.filter.set_columns(self.st.query_context());
@@ -624,6 +713,98 @@ impl DocView {
         self.filter.view_active()
     }
 
+    /// The order the rows are shown in when the view is sorted (and the sort
+    /// is up to date for the current filter), else `None`.
+    pub fn sorted_order(&self) -> Option<Arc<SortedOrder>> {
+        if !self.is_filtered() || !self.table_active() {
+            return None;
+        }
+        self.sort
+            .display_order(self.filter.epoch, self.snapshot.generation)
+    }
+
+    /// Requests a sort of the filtered view (`None` clears it). The work runs
+    /// in the background; see [`crate::sort`].
+    pub fn set_sort(&mut self, spec: Option<SortSpec>) {
+        self.bookmark_cursor = None;
+        let was_sorted = self.sorted_order().is_some();
+        self.sort.set(spec);
+        if spec.is_none() && was_sorted {
+            // Back to file order: show its top (the old top row would be
+            // somewhere in the middle of it).
+            self.pending_px = 0.0;
+            self.follow = false;
+            if let Some(first) = self.active_set().and_then(|s| s.get(0)) {
+                self.pos = Pos::at(first);
+            }
+        }
+    }
+
+    /// Applies what the user chose in a header menu or by clicking a header.
+    pub fn choose_sort(&mut self, col: usize, choice: SortChoice) {
+        self.set_sort(crate::sort::apply_choice(col, choice));
+    }
+
+    /// Whether sorting is offered right now, and why not when it is not.
+    pub fn sort_offer(&self) -> Arc<crate::sort::SortOffer> {
+        self.sort
+            .offer(self.is_filtered(), self.filter.set.len() as u64)
+    }
+
+    /// Advances the sort (see [`SortState::tick`]) and reacts to a new order.
+    fn tick_sort(&mut self, now: Instant, out: &mut PumpOutput) {
+        if self.sort.spec.is_none() && !self.sort.busy() {
+            return;
+        }
+        let set = self.active_set();
+        let ctx = self.filter.columns().cloned();
+        let tick = self.sort.tick(&TickInput {
+            now,
+            doc: &self.doc,
+            wake: &self.wake,
+            set: set.as_ref(),
+            table: self.table_active(),
+            ctx: ctx.as_ref(),
+            filter_epoch: self.filter.epoch,
+            generation: self.snapshot.generation,
+        });
+        if tick.repaint || self.sort.busy() {
+            out.repaint = true;
+        }
+        if tick.scroll_top
+            && let Some(first) = self.sorted_order().and_then(|o| o.get(0))
+        {
+            self.follow = false;
+            self.pending_px = 0.0;
+            self.pos = Pos::at(first);
+            self.sort_top_hint = 0;
+        }
+    }
+
+    /// Whether the line at `offset` is selected (in the order shown).
+    pub fn selection_contains(&self, offset: u64) -> bool {
+        self.selection_test().contains(offset)
+    }
+
+    /// A snapshot of the selection for painting many rows.
+    pub fn selection_test(&self) -> SelTest {
+        let Some(s) = self.selection else {
+            return SelTest::None;
+        };
+        if let Some(order) = self.sorted_order() {
+            let a = order.position(s.anchor.offset);
+            let b = order.position(s.cursor.offset);
+            if let (Some(a), Some(b)) = (a, b) {
+                return SelTest::Positions {
+                    order,
+                    lo: a.min(b),
+                    hi: a.max(b),
+                };
+            }
+        }
+        SelTest::Offsets(s)
+    }
+
     /// Whether the document is still being opened.
     pub fn is_opening(&self) -> bool {
         matches!(self.snapshot.state, DocState::Opening)
@@ -711,6 +892,7 @@ impl DocView {
         }
 
         self.tick_search_and_filter(now, &mut out);
+        self.tick_sort(now, &mut out);
         self.step_copy(&mut out);
         out
     }
@@ -735,9 +917,9 @@ impl DocView {
         self.thumb_drag = None;
         self.hl.borrow_mut().clear_cache();
         self.galleys.borrow_mut().clear();
-        self.tcache.clear();
+        self.clear_table_caches();
         self.time_cache.borrow_mut().clear();
-        self.max_text_w = 0.0;
+        self.reset_widths();
         self.alert_next = None;
         self.was_exact = false;
         self.max_end = 0;
@@ -937,17 +1119,27 @@ impl DocView {
     pub fn update_rows(&mut self, m: Metrics, height_of: &dyn Fn(&Line) -> f32) -> Visible {
         self.metrics = m;
         let set = self.active_set();
+        let sorted = self.sorted_order();
         let utf8_len = self.snapshot.utf8_len;
-        let space = match &set {
-            Some(s) => RowSpace::Filtered { set: s },
-            None => RowSpace::Full { utf8_len },
+        let space = match (&sorted, &set) {
+            (Some(o), _) => RowSpace::Sorted { order: o },
+            (None, Some(s)) => RowSpace::Filtered { set: s },
+            (None, None) => RowSpace::Full { utf8_len },
         };
         let view_rows = m.view_rows();
 
         self.apply_initial();
 
         // A filtered view can only start at one of its own lines.
-        if let Some(s) = &set
+        if let Some(o) = &sorted {
+            // A re-sort may have dropped the top row: stay near its position.
+            if !self.follow && !o.is_empty() && !o.contains(self.pos.top) {
+                let idx = self.sort_top_hint.min(o.len() - 1);
+                if let Some(off) = o.get(idx) {
+                    self.pos = Pos::at(off);
+                }
+            }
+        } else if let Some(s) = &set
             && !self.follow
             && !s.is_empty()
             && !s.contains(self.pos.top)
@@ -990,9 +1182,17 @@ impl DocView {
         }
 
         let vis = layout_rows(&self.pos, &space, &self.cache, m.view_h, height_of);
+        if let Some(p) = sorted.as_ref().and_then(|o| o.position(self.pos.top)) {
+            self.sort_top_hint = p;
+        }
 
         // Reached the bottom by scrolling: resume following.
-        if !self.follow && self.resume_on_bottom && vis.reaches_end && self.at_bottom(&vis, m) {
+        if !self.follow
+            && self.resume_on_bottom
+            && sorted.is_none()
+            && vis.reaches_end
+            && self.at_bottom(&vis, m)
+        {
             self.follow = true;
             self.resume_on_bottom = false;
         }
@@ -1053,13 +1253,14 @@ impl DocView {
                     ReqKind::Tail,
                 );
             }
-            RowSpace::Filtered { set } => {
+            RowSpace::Filtered { .. } | RowSpace::Sorted { .. } => {
                 // Anchor at the last row so the generic read planning loads it.
                 if let Some(last) = space.last_start() {
                     if self.cache.get(last).is_none() || self.pos.top != last {
                         self.pos = Pos::at(last);
                     }
-                } else if set.is_empty() {
+                } else {
+                    // No rows (yet).
                     self.pos = Pos::default();
                 }
             }
@@ -1186,6 +1387,9 @@ impl DocView {
     }
 
     fn row_space_first(&self) -> Option<u64> {
+        if let Some(o) = self.sorted_order() {
+            return o.get(0);
+        }
         match self.active_set() {
             Some(s) => s.get(0),
             None => (self.snapshot.utf8_len > 0).then_some(0),
@@ -1242,6 +1446,24 @@ impl DocView {
         self.pending_px = 0.0;
         self.resume_on_bottom = true;
         self.cursor = Some(offset);
+        if let (Some(order), Some(set)) = (self.sorted_order(), self.active_set()) {
+            // The line's own position, or that of the nearest line of the
+            // filter that is in the order.
+            let at = order
+                .position(offset)
+                .or_else(|| {
+                    let near = set.rank(offset).min(set.len().saturating_sub(1));
+                    order.position(set.get(near)?)
+                })
+                .unwrap_or(0);
+            let half = if center { self.view_rows() / 2 } else { 0 };
+            let idx = at.saturating_sub(half).min(order.len().saturating_sub(1));
+            if let Some(o) = order.get(idx) {
+                self.pos = Pos::at(o);
+                self.sort_top_hint = idx;
+            }
+            return;
+        }
         if let Some(set) = self.active_set() {
             let rank = set.rank(offset);
             let half = if center { self.view_rows() / 2 } else { 0 };
@@ -1279,7 +1501,11 @@ impl DocView {
         match space {
             ScrollSpace::Lines { total, visible, .. } => {
                 let idx = lines_target(position, total, visible);
-                if let Some(set) = self.active_set() {
+                if let Some(order) = self.sorted_order() {
+                    if let Some(o) = order.get(idx as usize) {
+                        self.pos = Pos::at(o);
+                    }
+                } else if let Some(set) = self.active_set() {
                     if let Some(o) = set.get(idx as usize) {
                         self.pos = Pos::at(o);
                     }
@@ -1304,6 +1530,13 @@ impl DocView {
         self.follow = false;
         self.resume_on_bottom = true;
         self.pending_px = 0.0;
+        if let Some(order) = self.sorted_order() {
+            let idx = ((fraction * order.len() as f64) as usize).min(order.len().saturating_sub(1));
+            if let Some(o) = order.get(idx) {
+                self.pos = Pos::at(o);
+            }
+            return;
+        }
         if let Some(set) = self.active_set() {
             let idx = ((fraction * set.len() as f64) as usize).min(set.len().saturating_sub(1));
             if let Some(o) = set.get(idx) {
@@ -1354,6 +1587,16 @@ impl DocView {
     /// The scrollbar geometry for the rows in `vis`.
     pub fn scroll_space(&self, vis: &Visible) -> ScrollSpace {
         let visible = vis.rows.len() as u64;
+        if let Some(order) = self.sorted_order() {
+            return ScrollSpace::Lines {
+                total: order.len() as u64,
+                top: order
+                    .position(self.pos.top)
+                    .unwrap_or(self.sort_top_hint.min(order.len().saturating_sub(1)))
+                    as u64,
+                visible,
+            };
+        }
         if let Some(set) = self.active_set() {
             return ScrollSpace::Lines {
                 total: set.len() as u64,
@@ -1441,12 +1684,14 @@ impl DocView {
 
     /// Selects every line.
     pub fn select_all(&mut self) {
-        let (first, last) = match self.active_set() {
-            Some(set) => (
+        let sorted = self.sorted_order();
+        let (first, last) = match (&sorted, self.active_set()) {
+            (Some(o), _) => (o.get(0), o.len().checked_sub(1).and_then(|i| o.get(i))),
+            (None, Some(set)) => (
                 set.get(0),
                 set.len().checked_sub(1).and_then(|i| set.get(i)),
             ),
-            None => (
+            (None, None) => (
                 (self.snapshot.utf8_len > 0).then_some(0),
                 self.cache
                     .last_line_ending_at(self.snapshot.utf8_len)
@@ -1473,6 +1718,9 @@ impl DocView {
     pub fn selection_count(&self) -> Option<(u64, bool)> {
         let s = self.selection?;
         let (lo, hi) = s.bounds();
+        if let SelTest::Positions { lo, hi, .. } = self.selection_test() {
+            return Some(((hi - lo + 1) as u64, true));
+        }
         if let Some(set) = self.active_set() {
             let n = set.rank(hi.offset).saturating_sub(set.rank(lo.offset)) + 1;
             return Some((n as u64, true));
@@ -1491,11 +1739,21 @@ impl DocView {
             return;
         };
         let (lo, hi) = s.bounds();
-        let list = self.active_set().map(|set| {
-            let a = set.rank(lo.offset);
-            let b = set.rank(hi.offset);
-            (a..=b).filter_map(|i| set.get(i)).collect::<Vec<u64>>()
-        });
+        let list = match self.selection_test() {
+            SelTest::Positions { order, lo, hi } => {
+                // At most what a copy collects (plus one to see the cut).
+                Some(
+                    order
+                        .slice(lo, hi.min(lo.saturating_add(MAX_COPY_LINES)))
+                        .to_vec(),
+                )
+            }
+            _ => self.active_set().map(|set| {
+                let a = set.rank(lo.offset);
+                let b = set.rank(hi.offset);
+                (a..=b).filter_map(|i| set.get(i)).collect::<Vec<u64>>()
+            }),
+        };
         let digits = crate::viewport::digits(hi.number.saturating_add(1)) + 1;
         self.copy = Some(CopyJob {
             with_numbers,
@@ -1557,7 +1815,11 @@ impl DocView {
             job.lines += 1;
             job.idx += 1;
             job.next = line.offset + line.len;
-            let done = line.offset >= job.hi.offset;
+            // A list ends with the list (a sorted view is not in offset order).
+            let done = match &job.list {
+                Some(l) => job.idx >= l.len(),
+                None => line.offset >= job.hi.offset,
+            };
             if job.lines >= MAX_COPY_LINES || job.out.len() >= MAX_COPY_BYTES {
                 job.truncated = !done;
                 self.finish_copy(job, out);
@@ -2113,6 +2375,170 @@ mod tests {
         let texts: Vec<&str> = vis.rows.iter().map(|r| r.line.text.as_str()).collect();
         assert!(texts.iter().all(|t| t.contains("0004")), "{texts:?}");
         assert!(matches!(v.scroll_space(&vis), ScrollSpace::Lines { .. }));
+    }
+
+    /// A logfmt view of 30 lines `n=<perm> id=x<i>` (`n` a permutation of
+    /// 0..30), filtered to all of them, with the table showing.
+    fn sorted_setup() -> (DocView, Arc<MemSource>) {
+        let text: String = (0..30)
+            .map(|i| format!("n={} id=x{i}\n", (i * 7) % 30))
+            .collect();
+        let mem = Arc::new(MemSource::new(text.into_bytes()));
+        let doc = Arc::new(Document::from_source(mem.clone(), "s.log"));
+        let mut v = DocView::new(doc, &init(false));
+        let mut kinds = std::collections::BTreeMap::new();
+        kinds.insert("n".to_string(), oxtail_columns::ColumnKind::Number);
+        v.choose_parser(oxtail_columns::ParserSpec::Logfmt {
+            columns: vec!["n".into(), "id".into()],
+            kinds,
+        })
+        .expect("parser");
+        v.set_table(true);
+        v.filter.entries = vec![crate::filter::FilterEntry::include("id=")];
+        v.filter.changed();
+        run_until(&mut v, |v, vis| {
+            v.is_filtered()
+                && v.filter.status.done
+                && v.filter.set.len() == 30
+                && vis.rows.len() == 10
+        });
+        (v, mem)
+    }
+
+    fn first_n(vis: &Visible) -> String {
+        vis.rows[0]
+            .line
+            .text
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn a_sorted_view_orders_rows_and_keeps_navigation_working() {
+        let (mut v, _mem) = sorted_setup();
+        v.set_sort(Some(SortSpec {
+            col: 0,
+            descending: false,
+        }));
+        let vis = run_until(&mut v, |v, vis| {
+            v.sorted_order().is_some() && vis.rows.len() == 10 && first_n(vis) == "n=0"
+        });
+        let ns: Vec<String> = vis
+            .rows
+            .iter()
+            .map(|r| r.line.text.split_whitespace().next().unwrap().to_string())
+            .collect();
+        assert_eq!(ns, (0..10).map(|n| format!("n={n}")).collect::<Vec<_>>());
+        // The scrollbar counts positions in the sorted order.
+        assert!(matches!(
+            v.scroll_space(&vis),
+            ScrollSpace::Lines {
+                total: 30,
+                top: 0,
+                ..
+            }
+        ));
+
+        // Go to line 10 (n=(10*7)%30=10): it sits at position 10 of the order.
+        v.jump_to_line(10, false);
+        let vis = run_until(&mut v, |_, vis| {
+            vis.rows.len() == 10 && first_n(vis) == "n=10"
+        });
+        assert!(matches!(
+            v.scroll_space(&vis),
+            ScrollSpace::Lines { top: 10, .. }
+        ));
+
+        // Selection covers positions, not offsets: rows 10..=13 of the order.
+        let a = Arc::clone(&vis.rows[0].line);
+        let b = Arc::clone(&vis.rows[3].line);
+        v.select(&a, false);
+        v.select(&b, true);
+        assert_eq!(v.selection_count(), Some((4, true)));
+        assert!(
+            vis.rows[..4]
+                .iter()
+                .all(|r| v.selection_contains(r.line.offset))
+        );
+        assert!(!v.selection_contains(vis.rows[4].line.offset));
+        v.copy_selection(false);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let copied = loop {
+            let out = v.pump(Instant::now());
+            v.update_rows(M, &h);
+            if let Some(c) = out.copied {
+                break c;
+            }
+            assert!(Instant::now() < deadline, "copy did not finish");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let got: Vec<&str> = copied
+            .lines()
+            .map(|l| l.split_whitespace().next().unwrap())
+            .collect();
+        assert_eq!(got, ["n=10", "n=11", "n=12", "n=13"]);
+
+        // Everything.
+        v.select_all();
+        assert_eq!(v.selection_count(), Some((30, true)));
+
+        // Clearing the sort goes back to file order, from its top.
+        v.set_sort(None);
+        let vis = run_until(&mut v, |v, vis| {
+            v.sorted_order().is_none() && vis.rows.len() == 10 && first_n(vis) == "n=0"
+        });
+        // File order: n = (i*7)%30 for i = 0, 1, 2 -> 0, 7, 14.
+        assert_eq!(vis.rows[1].line.text.split_whitespace().next(), Some("n=7"));
+    }
+
+    #[test]
+    fn jumping_past_the_last_row_of_a_sorted_view_lands_on_the_nearest_row() {
+        let (mut v, _mem) = sorted_setup();
+        v.set_sort(Some(SortSpec {
+            col: 0,
+            descending: false,
+        }));
+        run_until(&mut v, |v, vis| {
+            v.sorted_order().is_some() && vis.rows.len() == 10 && first_n(vis) == "n=0"
+        });
+        // Beyond every line: the nearest filter row is the file's last line
+        // (i=29, n=(29*7)%30=23), at position 23 of the order.
+        v.jump_offset(1 << 40, false);
+        // Rows 23..=29 remain: seven.
+        let vis = run_until(&mut v, |_, vis| {
+            vis.rows.len() == 7 && first_n(vis) == "n=23"
+        });
+        assert_eq!(vis.rows.len(), 7);
+    }
+
+    #[test]
+    fn a_resort_keeps_the_top_row_when_it_is_still_there() {
+        let (mut v, mem) = sorted_setup();
+        v.set_sort(Some(SortSpec {
+            col: 0,
+            descending: true,
+        }));
+        run_until(&mut v, |v, vis| {
+            v.sorted_order().is_some() && vis.rows.len() == 10 && first_n(vis) == "n=29"
+        });
+        v.jump_to_line(6, false); // n = 12, position 17 of the descending order
+        let vis = run_until(&mut v, |_, vis| {
+            vis.rows.len() == 10 && first_n(vis) == "n=12"
+        });
+        let top = vis.rows[0].line.offset;
+        let old = v.sorted_order().unwrap();
+        assert_eq!((old.len(), old.position(top)), (30, Some(17)));
+        // A new match with the largest value arrives: it becomes row 0, so
+        // every other row moves down by one, but the line on top stays.
+        mem.append(b"n=100 id=late\n");
+        let vis = run_until(&mut v, |v, vis| {
+            v.sorted_order().is_some_and(|o| o.len() == 31) && vis.rows.len() == 10
+        });
+        assert_eq!(vis.rows[0].line.offset, top);
+        assert_eq!(first_n(&vis), "n=12");
+        assert_eq!(v.sorted_order().unwrap().position(top), Some(18));
     }
 
     #[test]

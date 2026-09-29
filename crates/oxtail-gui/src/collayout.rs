@@ -173,10 +173,27 @@ impl ColumnLayout {
         self.resize(pos, want);
     }
 
+    /// The schema column that takes the remaining width: the message column
+    /// when it is visible, else the last visible column.
+    pub fn fill_col(&self) -> Option<usize> {
+        let visible = || self.cols.iter().filter(|c| c.visible);
+        self.message
+            .filter(|m| visible().any(|c| c.col == *m))
+            .or_else(|| visible().next_back().map(|c| c.col))
+    }
+
     /// Pixel placement of the visible columns for a table `available` pixels
     /// wide, with `char_w` pixels per character. When all columns are
     /// narrower than the table, the stretching column takes the remainder.
     pub fn placements(&self, available: f32, char_w: f32) -> Vec<Placement> {
+        self.placements_fill(available, char_w, 0.0)
+    }
+
+    /// Like [`ColumnLayout::placements`], and the stretching column is at
+    /// least `fill_min` pixels wide even when that makes the table wider than
+    /// `available` (so a long message can be scrolled to instead of being cut
+    /// off). Other columns keep their widths.
+    pub fn placements_fill(&self, available: f32, char_w: f32, fill_min: f32) -> Vec<Placement> {
         let char_w = char_w.max(1.0);
         let mut out: Vec<Placement> = Vec::with_capacity(self.cols.len());
         let mut x = 0.0;
@@ -191,16 +208,16 @@ impl ColumnLayout {
             x += w;
         }
         let spare = available - x;
-        if spare > 0.0 {
-            // The stretching column, else the last visible one.
-            let idx = self
-                .message
-                .and_then(|m| out.iter().position(|p| p.col == m))
-                .unwrap_or_else(|| out.len().saturating_sub(1));
-            if let Some(p) = out.get_mut(idx) {
-                p.w += spare;
+        let idx = self
+            .fill_col()
+            .and_then(|m| out.iter().position(|p| p.col == m))
+            .unwrap_or_else(|| out.len().saturating_sub(1));
+        if let Some(p) = out.get_mut(idx) {
+            let extra = spare.max(fill_min - p.w).max(0.0);
+            if extra > 0.0 {
+                p.w += extra;
                 for later in out.iter_mut().skip(idx + 1) {
-                    later.x += spare;
+                    later.x += extra;
                 }
             }
         }
@@ -209,10 +226,25 @@ impl ColumnLayout {
 
     /// Total width in pixels of the visible columns (without stretching).
     pub fn total_width(&self, char_w: f32) -> f32 {
+        self.total_width_fill(char_w, 0.0)
+    }
+
+    /// Total width in pixels of the visible columns when the stretching
+    /// column is at least `fill_min` pixels wide.
+    pub fn total_width_fill(&self, char_w: f32, fill_min: f32) -> f32 {
+        let char_w = char_w.max(1.0);
+        let fill = self.fill_col();
         self.cols
             .iter()
             .filter(|c| c.visible)
-            .map(|c| c.width * char_w.max(1.0))
+            .map(|c| {
+                let w = c.width * char_w;
+                if Some(c.col) == fill {
+                    w.max(fill_min)
+                } else {
+                    w
+                }
+            })
             .sum()
     }
 
@@ -559,5 +591,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_fill_column_can_be_wider_than_the_table() {
+        let (_, mut l) = layout(&["ts", "message", "extra"]);
+        l.resize(0, 10.0);
+        l.resize(1, 20.0);
+        l.resize(2, 10.0);
+        // 40 chars of 10 px = 400 px of columns in a 1000 px table: the
+        // message column takes the rest.
+        let p = l.placements(1000.0, 10.0);
+        assert_eq!(p[1].w, 200.0 + 600.0);
+        assert_eq!(p[2].x, 10.0 * 10.0 + 800.0);
+        // Content that needs 3000 px makes the table wider than the view.
+        let p = l.placements_fill(1000.0, 10.0, 3000.0);
+        assert_eq!((p[0].x, p[0].w), (0.0, 100.0));
+        assert_eq!(p[1].w, 3000.0);
+        assert_eq!(p[2].x, 3100.0);
+        assert_eq!(l.total_width_fill(10.0, 3000.0), 100.0 + 3000.0 + 100.0);
+        assert_eq!(l.total_width(10.0), 400.0);
+        // A hidden message column hands the job to the last visible one.
+        l.set_visible(1, false);
+        assert_eq!(l.fill_col(), Some(2));
     }
 }

@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use egui::epaint::{CornerRadius, StrokeKind};
 use egui::{
@@ -25,8 +26,9 @@ use crate::docview::DocView;
 use crate::highlight::{HighlightState, Prepared};
 use crate::minimap::{bin_matches, bin_of, bin_points, click_fraction, intensity};
 use crate::scroll::{Row, Visible};
-use crate::table::{CellKey, HEADER_EXTRA, HeaderGeometry, draw_header};
-use crate::tablepaint::{TableRow, paint_table_row};
+use crate::sort::{MINIMAP_REFRESH, MINIMAP_WORK_CAP, position_bins};
+use crate::table::{CELL_PAD, CellKey, HEADER_EXTRA, HeaderGeometry, SortHeader, draw_header};
+use crate::tablepaint::{TableRow, WrapSpec, paint_table_row, wrapped_row_height};
 use crate::text::{JobOptions, build_job, clean_ranges, compose};
 use crate::timeview::{REL_CHARS, RelMode, format_gap, gap_between, relative_label};
 use crate::viewport::{TrackClick, classify_click, digits, position_at, thumb_px};
@@ -36,7 +38,7 @@ pub const SCROLLBAR_W: f32 = 12.0;
 /// Width of the minimap strip.
 pub const MINIMAP_W: f32 = 12.0;
 /// Height of the horizontal scrollbar.
-pub const HBAR_H: f32 = 10.0;
+pub const HBAR_H: f32 = 13.0;
 /// Horizontal padding inside the gutter and before the text.
 const PAD: f32 = 6.0;
 /// Space for the bookmark / rule marker at the left edge of the gutter.
@@ -209,17 +211,23 @@ pub fn layout_line(
 /// Binned minimap data, recomputed only when its inputs change.
 #[derive(Default)]
 pub struct MinimapCache {
-    key: (usize, usize, usize, u64, usize, usize),
+    key: (usize, usize, usize, u64, usize, usize, usize),
     search: Vec<u32>,
     filter: Vec<u32>,
     ticks: Vec<Option<(u32, ColorRef)>>,
     bookmarks: Vec<bool>,
+    /// When a sorted-view strip was last computed (refreshes are throttled).
+    sorted_at: Option<Instant>,
 }
 
 impl MinimapCache {
     fn refresh(&mut self, view: &DocView, bins: usize) {
         let hl = view.hl.borrow();
         let utf8_len = view.snapshot.utf8_len;
+        // In a sorted view the strip maps *positions in the sorted order*
+        // (not byte offsets), so marks are placed by the position of their
+        // line; a re-sort changes the identity of the order.
+        let order = view.sorted_order();
         let key = (
             view.find.matches.len(),
             view.filter.set.len(),
@@ -227,11 +235,50 @@ impl MinimapCache {
             utf8_len,
             bins,
             view.bookmarks.len(),
+            order.as_ref().map_or(0, |o| Arc::as_ptr(o) as usize),
         );
         if key == self.key && self.search.len() == bins {
             return;
         }
+        let old_key = self.key;
         self.key = key;
+        if let Some(order) = order {
+            // A sorted strip is bounded work: refreshed at most a few times a
+            // second, over at most MINIMAP_WORK_CAP items, and left as it
+            // was while a search still changes its matches every frame.
+            let now = Instant::now();
+            if self
+                .sorted_at
+                .is_some_and(|t| now.duration_since(t) < MINIMAP_REFRESH)
+                && self.search.len() == bins
+            {
+                self.key = old_key;
+                return;
+            }
+            self.sorted_at = Some(now);
+            let total = order.len() as u64;
+            let at = |o: u64| order.position(o).map(|p| p as u64);
+            self.search = position_bins(&order, &view.find.matches, bins, MINIMAP_WORK_CAP)
+                .unwrap_or_else(|| vec![0; bins]);
+            // Every row of a sorted view is a filter match: nothing to show.
+            self.filter = Vec::new();
+            self.ticks = if hl.ticks.len() <= MINIMAP_WORK_CAP {
+                bin_points(
+                    hl.ticks.iter().filter_map(|(o, c)| Some((at(*o)?, *c))),
+                    total,
+                    bins,
+                )
+            } else {
+                vec![None; bins]
+            };
+            self.bookmarks = vec![false; bins];
+            for b in view.bookmarks.values() {
+                if let Some(p) = b.offset.and_then(at) {
+                    self.bookmarks[bin_of(p, total, bins)] = true;
+                }
+            }
+            return;
+        }
         self.search = bin_matches(&view.find.matches, utf8_len, bins);
         self.filter = if view.filter.has_job() {
             bin_matches(&view.filter.set, utf8_len, bins)
@@ -303,6 +350,9 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
 
     // In table mode the header sits above the body; `full` is the body.
     let table = view.table_active();
+    if !table {
+        view.header_cells.clear();
+    }
     let header_h = if table { row_h + HEADER_EXTRA } else { 0.0 };
     let outer = ui.available_rect_before_wrap();
     ui.allocate_rect(outer, Sense::hover());
@@ -333,8 +383,11 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     let text_left = full.left() + gutter_w;
     let text_right = (full.right() - right_w).max(text_left + 20.0);
     let text_w = text_right - text_left;
+    // The table is as wide as its columns, and (without wrapping) as its
+    // longest message or continuation line, so nothing is cut off.
+    let fill_min = fill_min_px(view, char_w);
     if table {
-        view.max_text_w = view.st.layout.total_width(char_w);
+        view.max_text_w = table_width(view, char_w, fill_min);
     }
     let need_hbar = (!view.wrap || table) && view.max_text_w + PAD * 2.0 > text_w;
     let bottom = full.bottom() - if need_hbar { HBAR_H } else { 0.0 };
@@ -361,19 +414,36 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     );
     // Over the view (also its scrollbars), and not under a popup or window.
     let hovered = ui.rect_contains_pointer(full);
+    let hbar_rect = rect_between(pos2(full.left(), bottom), pos2(text_right, full.bottom()));
     if hovered {
         let delta = ui.input(|i| i.smooth_scroll_delta);
+        let over_hbar = need_hbar && ui.rect_contains_pointer(hbar_rect);
         if delta.y != 0.0 {
-            view.scroll_px(-delta.y);
+            if over_hbar {
+                // The plain wheel over the horizontal bar scrolls sideways.
+                view.h_scroll -= delta.y;
+            } else {
+                view.scroll_px(-delta.y);
+            }
         }
         // egui already turns Shift+wheel into a horizontal delta.
-        if delta.x != 0.0 && !view.wrap {
+        if delta.x != 0.0 && (!view.wrap || table) {
             view.h_scroll -= delta.x;
         }
     }
 
     // ---- rows
     let wrap_w = (view.wrap && !table).then(|| (text_w - PAD * 2.0).max(char_w * 8.0));
+    // Table geometry (before the rows: wrapping needs the fill column's
+    // width to measure row heights).
+    let mut placements = if table {
+        view.st.layout.placements_fill(text_w, char_w, fill_min)
+    } else {
+        Vec::new()
+    };
+    let wrap_spec = wrap_spec_for(view, table, &placements, text_w, char_w);
+    let wrap_cells = Rc::clone(&view.wrap_cells);
+    wrap_cells.borrow_mut().begin_frame();
     let hl = Rc::clone(&view.hl);
     let galleys = Rc::clone(&view.galleys);
     galleys.borrow_mut().begin_frame();
@@ -394,6 +464,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         .wrapping_mul(2)
         .wrapping_add(u64::from(view.find.open));
     let set = view.active_set();
+    let sorted = view.sorted_order().is_some();
     let current = view.find.open.then_some(view.find.current).flatten();
     let lopts = LayoutOpts {
         colors,
@@ -405,7 +476,33 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         current,
         set: set.as_deref(),
     };
+    let wrap_bits = wrap_spec.map_or(0, |w| {
+        w.cell_w.to_bits().wrapping_mul(31) ^ w.cont_w.to_bits()
+    });
+    let key_of = |line: &Line| CellKey {
+        epoch,
+        current: current == Some(line.offset),
+        dimmed: set
+            .as_deref()
+            .is_some_and(|s| s.is_context(s.rank(line.offset)) && s.contains(line.offset)),
+        wrap_bits,
+    };
     let height_of = |line: &Line| -> f32 {
+        if let Some(spec) = &wrap_spec {
+            let prepared = hl.borrow_mut().prepare(line);
+            return wrapped_row_height(
+                &ctx,
+                colors,
+                &font,
+                row_h,
+                &mut wrap_cells.borrow_mut(),
+                line,
+                &prepared,
+                spec,
+                key_of(line),
+                matcher.as_ref(),
+            );
+        }
         if wrap_w.is_some() {
             let (_, g) = layout_line(&ctx, &hl, &galleys, &lopts, line);
             g.size().y.max(row_h)
@@ -415,16 +512,31 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     };
     view.repaint_after = None;
     let vis: Visible = view.update_rows(metrics, &height_of);
+    view.last_heights = vis.rows.iter().map(|r| r.height).collect();
+    view.hbar_rect = None;
     if let Some(d) = view.repaint_after.take() {
         ctx.request_repaint_after(d);
     }
 
     // Horizontal scroll range.
     let mut widest = view.max_text_w;
+    let (mut fill_seen, mut cont_seen) = (view.fill_chars, view.cont_chars);
+    let fill_col = view.st.layout.fill_col();
     let mut laid: Vec<(Arc<Prepared>, Option<Arc<Galley>>)> = Vec::with_capacity(vis.rows.len());
     for r in &vis.rows {
         if table {
-            laid.push((hl.borrow_mut().prepare(&r.line), None));
+            let p = hl.borrow_mut().prepare(&r.line);
+            if !view.wrap {
+                match (&p.record, fill_col) {
+                    (Some(rec), Some(f)) => {
+                        let n = view.st.cell_text(f, rec).chars().count() as f32;
+                        fill_seen = fill_seen.max(n);
+                    }
+                    (None, _) => cont_seen = cont_seen.max(p.text.chars().count() as f32),
+                    _ => {}
+                }
+            }
+            laid.push((p, None));
         } else {
             let (p, g) = layout_line(&ctx, &hl, &galleys, &lopts, &r.line);
             widest = widest.max(g.size().x);
@@ -433,18 +545,21 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     }
     if !table {
         view.max_text_w = widest;
+    } else if fill_seen > view.fill_chars || cont_seen > view.cont_chars {
+        // A wider line came into view: widen the table now, and lay out the
+        // hbar with it next frame.
+        view.fill_chars = fill_seen;
+        view.cont_chars = cont_seen;
+        let fill_min = fill_min_px(view, char_w);
+        view.max_text_w = table_width(view, char_w, fill_min);
+        placements = view.st.layout.placements_fill(text_w, char_w, fill_min);
+        ctx.request_repaint();
     }
     let max_h = (view.max_text_w + PAD * 2.0 - text_w).max(0.0);
     view.h_scroll = if view.wrap && !table {
         0.0
     } else {
         view.h_scroll.clamp(0.0, max_h)
-    };
-    // Table geometry.
-    let placements = if table {
-        view.st.layout.placements(text_w, char_w)
-    } else {
-        Vec::new()
     };
     let pinned_w: f32 = placements.iter().filter(|p| p.pinned).map(|p| p.w).sum();
     let mut tcache = std::mem::take(&mut view.tcache);
@@ -455,7 +570,8 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     let gutter_painter = painter.with_clip_rect(gutter_rect);
     painter.rect_filled(gutter_rect, CornerRadius::ZERO, colors.gutter_bg);
     let mut prev_offset: Option<u64> = None;
-    let time_on = view.rel_mode != RelMode::Off || env.gap_secs > 0.0;
+    // Gaps and relative times between rows mean nothing in a sorted order.
+    let time_on = !sorted && (view.rel_mode != RelMode::Off || env.gap_secs > 0.0);
     let mut prev_ts: Option<Timestamp> = if time_on {
         vis.rows.first().and_then(|r| view.time_before(&r.line))
     } else {
@@ -466,7 +582,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     } else {
         None
     };
-    let selection = view.selection;
+    let selection = view.selection_test();
     let cursor = view.cursor;
     let mut bookmark_updates: Vec<(u64, u64)> = Vec::new();
     for (row, (prepared, galley)) in vis.rows.iter().zip(&laid) {
@@ -506,7 +622,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
             prev_ts = ts;
         }
 
-        let selected = selection.is_some_and(|s| s.contains(row.line.offset));
+        let selected = selection.contains(row.line.offset);
         if selected {
             painter.rect_filled(row_rect, CornerRadius::ZERO, colors.selection_bg);
             painter.rect_filled(gutter_row, CornerRadius::ZERO, colors.selection_bg);
@@ -536,14 +652,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                 colors.text,
             );
         } else {
-            let dimmed = set.as_deref().is_some_and(|s| {
-                s.is_context(s.rank(row.line.offset)) && s.contains(row.line.offset)
-            });
-            let key = CellKey {
-                epoch,
-                current: current == Some(row.line.offset),
-                dimmed,
-            };
+            let key = key_of(&row.line);
             paint_table_row(
                 &TableRow {
                     ctx: &ctx,
@@ -551,6 +660,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                     colors,
                     font: &font,
                     row_h,
+                    height: row.height,
                     char_w,
                     y,
                     text_rect,
@@ -560,6 +670,8 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                     line: &row.line,
                     key,
                     matcher: matcher.as_ref(),
+                    wrap: wrap_spec,
+                    wrap_cache: &wrap_cells,
                 },
                 &mut tcache,
                 &painter,
@@ -651,6 +763,24 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         }
         // Header.
         if let Some(parser) = view.st.parser.clone() {
+            view.header_cells = placements
+                .iter()
+                .map(|p| {
+                    let x0 = text_left + p.x - if p.pinned { 0.0 } else { view.h_scroll };
+                    (
+                        p.col,
+                        Rect::from_min_max(pos2(x0, outer.top()), pos2(x0 + p.w, full.top())),
+                    )
+                })
+                .collect();
+            let offer = view.sort_offer();
+            let note = sort_note(view);
+            let sort_header = SortHeader {
+                active: view.sort.spec,
+                offer: &offer,
+                progress: view.sort.fraction(),
+                note: note.as_deref(),
+            };
             let geo = HeaderGeometry {
                 rect: Rect::from_min_max(
                     pos2(outer.left(), outer.top()),
@@ -662,6 +792,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                 pinned_w,
                 char_w,
                 placements: &placements,
+                sort: &sort_header,
             };
             let events = draw_header(
                 ui,
@@ -675,8 +806,14 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
             if !events.is_empty() {
                 let mut fits = HashMap::new();
                 for ev in &events {
-                    if let crate::table::HeaderEvent::Autofit(pos) = ev {
-                        fits.insert(*pos, view.widest_cell(*pos));
+                    match ev {
+                        crate::table::HeaderEvent::Autofit(pos) => {
+                            fits.insert(*pos, view.widest_cell(*pos));
+                        }
+                        crate::table::HeaderEvent::Sort(col, choice) => {
+                            view.choose_sort(*col, *choice);
+                        }
+                        _ => {}
                     }
                 }
                 let widest = |pos: usize| fits.get(&pos).copied().unwrap_or(0);
@@ -687,6 +824,19 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                     &widest,
                 ) {
                     view.st.dirty = true;
+                    // Another fill column or another set of columns: measure
+                    // the content again (a plain resize keeps what was seen).
+                    if events.iter().any(|e| {
+                        !matches!(
+                            e,
+                            crate::table::HeaderEvent::Resize(..)
+                                | crate::table::HeaderEvent::Sort(..)
+                                | crate::table::HeaderEvent::Autofit(..)
+                        )
+                    }) {
+                        view.fill_chars = 0.0;
+                        view.cont_chars = 0.0;
+                    }
                 }
             }
             // The corner above the scrollbar and minimap.
@@ -735,32 +885,19 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     // ---- horizontal scrollbar
     if need_hbar {
         let hb = rect_between(pos2(text_left, bottom), pos2(text_right, full.bottom()));
-        painter.rect_filled(hb, CornerRadius::ZERO, colors.gutter_bg);
-        let total = view.max_text_w + PAD * 2.0;
-        let frac = (text_w / total).clamp(0.05, 1.0);
-        let len = hb.width() * frac;
-        let start = if max_h > 0.0 {
-            (view.h_scroll / max_h) * (hb.width() - len)
-        } else {
-            0.0
-        };
-        let thumb = rect_between(
-            pos2(hb.left() + start, hb.top() + 2.0),
-            pos2(hb.left() + start + len, hb.bottom() - 2.0),
-        );
+        view.hbar_rect = Some(hb);
+        draw_hscrollbar(ui, id, view, hb, text_w, max_h, colors, &painter);
+        // The gutter's part of the strip.
         painter.rect_filled(
-            thumb,
-            CornerRadius::same(3),
-            mix32(colors.border, colors.text, 0.2),
+            rect_between(pos2(full.left(), bottom), pos2(text_left, full.bottom())),
+            CornerRadius::ZERO,
+            colors.gutter_bg,
         );
-        let resp = ui.interact(hb, id.with("hbar"), Sense::click_and_drag());
-        if (resp.dragged() || resp.clicked())
-            && let Some(p) = resp.interact_pointer_pos()
-            && hb.width() > len
-        {
-            let f = ((p.x - hb.left() - len * 0.5) / (hb.width() - len)).clamp(0.0, 1.0);
-            view.h_scroll = f * max_h;
-        }
+    }
+
+    // ---- hint: lines are cut off
+    if need_hbar && !view.wrap {
+        draw_cut_hint(ui, id, view, text_rect, &font, colors, &painter);
     }
 
     // ---- "new lines" pill
@@ -809,6 +946,66 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         }
         resp.on_hover_text("Resume following (F)");
     }
+}
+
+/// The minimum width in pixels of the table's fill column: what its longest
+/// seen message needs. Zero when wrapping (the column then fits the view).
+fn fill_min_px(view: &DocView, char_w: f32) -> f32 {
+    if view.wrap || !view.table_active() {
+        0.0
+    } else {
+        view.fill_chars * char_w + 2.0 * CELL_PAD
+    }
+}
+
+/// The width of the whole table: its columns, and a continuation line that
+/// is longer (they span all columns).
+fn table_width(view: &DocView, char_w: f32, fill_min: f32) -> f32 {
+    let cols = view.st.layout.total_width_fill(char_w, fill_min);
+    if view.wrap {
+        cols
+    } else {
+        cols.max(view.cont_chars * char_w + 2.0 * CELL_PAD + 2.0 * char_w)
+    }
+}
+
+/// What wraps when Alt+Z is on in the table view: the fill column's cell and
+/// continuation lines. `None` without wrapping.
+fn wrap_spec_for(
+    view: &DocView,
+    table: bool,
+    placements: &[crate::collayout::Placement],
+    text_w: f32,
+    char_w: f32,
+) -> Option<WrapSpec> {
+    if !table || !view.wrap {
+        return None;
+    }
+    let fill = view.st.layout.fill_col()?;
+    let p = placements.iter().find(|p| p.col == fill)?;
+    let kind = view.st.parser.as_ref()?.schema().columns.get(fill)?.kind;
+    let min = char_w * 8.0;
+    Some(WrapSpec {
+        fill,
+        fill_is_text: matches!(
+            kind,
+            oxtail_columns::ColumnKind::Text | oxtail_columns::ColumnKind::Json
+        ),
+        cell_w: (p.w - 2.0 * CELL_PAD).max(min),
+        cont_w: (text_w - 2.0 * CELL_PAD - 2.0 * char_w).max(min),
+    })
+}
+
+/// A short note for the table header when a requested sort is not showing.
+fn sort_note(view: &DocView) -> Option<String> {
+    if let Some(n) = view.sort.refused {
+        return Some(format!(
+            "Sort off: {} rows (limit {})",
+            crate::sort::group_digits(n),
+            crate::sort::group_digits(view.sort.max_rows)
+        ));
+    }
+    view.sort.problem.clone()
 }
 
 fn empty_message(view: &DocView) -> Option<String> {
@@ -896,7 +1093,7 @@ fn handle_pointer(
     if resp.secondary_clicked()
         && let Some(p) = pos
         && let Some(line) = row_for(p)
-        && !view.selection.is_some_and(|s| s.contains(line.offset))
+        && !view.selection_contains(line.offset)
     {
         view.select(&line, false);
     }
@@ -1026,6 +1223,138 @@ fn draw_scrollbar(
     painter.rect_filled(thumb_rect, CornerRadius::same(3), thumb_color);
 }
 
+/// The horizontal scrollbar: same look as the vertical one, with hover and
+/// drag feedback. A click on the track pages sideways, a drag moves the
+/// thumb.
+#[allow(clippy::too_many_arguments)]
+fn draw_hscrollbar(
+    ui: &mut Ui,
+    id: Id,
+    view: &mut DocView,
+    track: Rect,
+    view_w: f32,
+    max_h: f32,
+    colors: &Colors,
+    painter: &egui::Painter,
+) {
+    painter.rect_filled(track, CornerRadius::ZERO, colors.gutter_bg);
+    painter.hline(
+        track.x_range(),
+        track.top() + 0.5,
+        Stroke::new(1.0, colors.border),
+    );
+    let total = view.max_text_w + PAD * 2.0;
+    let len = (track.width() * (view_w / total.max(1.0)).clamp(0.0, 1.0))
+        .max(24.0)
+        .min(track.width());
+    let room = (track.width() - len).max(0.0);
+    let start = if max_h > 0.0 {
+        (view.h_scroll / max_h).clamp(0.0, 1.0) * room
+    } else {
+        0.0
+    };
+    let resp = ui.interact(track, id.with("hbar"), Sense::click_and_drag());
+    let grab_id = id.with("hbar-grab");
+    if resp.drag_started()
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let x = p.x - track.left();
+        let grab = if x >= start && x <= start + len {
+            x - start
+        } else {
+            len * 0.5
+        };
+        ui.data_mut(|d| d.insert_temp(grab_id, grab));
+    }
+    if resp.dragged()
+        && let Some(p) = resp.interact_pointer_pos()
+        && room > 0.0
+    {
+        let grab = ui.data(|d| d.get_temp::<f32>(grab_id)).unwrap_or(len * 0.5);
+        let f = ((p.x - track.left() - grab) / room).clamp(0.0, 1.0);
+        view.h_scroll = f * max_h;
+    } else if resp.clicked()
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        // On the track beside the thumb: one page towards the click.
+        let x = p.x - track.left();
+        if x < start {
+            view.h_scroll = (view.h_scroll - view_w * 0.9).max(0.0);
+        } else if x > start + len {
+            view.h_scroll = (view.h_scroll + view_w * 0.9).min(max_h);
+        }
+    }
+    let thumb = rect_between(
+        pos2(track.left() + start, track.top() + 3.0),
+        pos2(track.left() + start + len, track.bottom() - 2.0),
+    );
+    let color = if resp.hovered() || resp.dragged() {
+        mix32(colors.border, colors.text, 0.45)
+    } else {
+        mix32(colors.border, colors.text, 0.25)
+    };
+    painter.rect_filled(thumb, CornerRadius::same(3), color);
+}
+
+/// A small pill at the bottom right telling that lines are cut off and how
+/// to read them. Shown until dismissed (once per tab).
+fn draw_cut_hint(
+    ui: &mut Ui,
+    id: Id,
+    view: &mut DocView,
+    text_rect: Rect,
+    font: &FontId,
+    colors: &Colors,
+    painter: &egui::Painter,
+) {
+    if view.cut_hint_dismissed {
+        return;
+    }
+    let text = "Lines are cut off. Alt+Z wraps them, Shift+wheel scrolls sideways.";
+    let galley = painter.layout_no_wrap(
+        text.to_string(),
+        FontId::proportional((font.size * 0.85).max(10.0)),
+        colors.text,
+    );
+    let size = galley.size() + vec2(34.0, 8.0);
+    let rect = Rect::from_min_size(
+        pos2(
+            (text_rect.right() - size.x - 10.0).max(text_rect.left()),
+            text_rect.bottom() - size.y - 8.0,
+        ),
+        size,
+    );
+    let fill = mix32(colors.gutter_bg, colors.text, 0.06);
+    painter.rect_filled(rect, CornerRadius::same(6), fill);
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(6),
+        Stroke::new(1.0, colors.border),
+        StrokeKind::Inside,
+    );
+    painter.galley(
+        pos2(rect.left() + 10.0, rect.center().y - galley.size().y * 0.5),
+        galley,
+        colors.text,
+    );
+    let close =
+        Rect::from_center_size(pos2(rect.right() - 12.0, rect.center().y), vec2(14.0, 14.0));
+    let resp = ui.interact(close, id.with("cut-hint-x"), Sense::click());
+    let c = if resp.hovered() {
+        colors.text
+    } else {
+        colors.gutter_text
+    };
+    let s = Stroke::new(1.4, c);
+    let m = close.center();
+    painter.line_segment([m + vec2(-3.5, -3.5), m + vec2(3.5, 3.5)], s);
+    painter.line_segment([m + vec2(-3.5, 3.5), m + vec2(3.5, -3.5)], s);
+    if resp.clicked() {
+        view.cut_hint_dismissed = true;
+    }
+    resp.on_hover_text("Dismiss");
+}
+
 fn draw_minimap(
     ui: &mut Ui,
     id: Id,
@@ -1083,13 +1412,41 @@ fn draw_minimap(
         }
     }
     view.minimap = cache;
-    // The visible region.
+    // The visible region (by position in a sorted view, else by byte).
     let utf8_len = view.snapshot.utf8_len;
-    if utf8_len > 0
-        && let (Some(first), Some(last)) = (vis.rows.first(), vis.rows.last())
-    {
-        let a = bin_of(first.line.offset, utf8_len, bins);
-        let b = bin_of(last.line.offset + last.line.len, utf8_len, bins).max(a);
+    let extent = match view.sorted_order() {
+        Some(order) => {
+            let total = order.len() as u64;
+            vis.rows
+                .first()
+                .zip(vis.rows.last())
+                .and_then(|(f, l)| {
+                    Some((
+                        order.position(f.line.offset)?,
+                        order.position(l.line.offset)?,
+                    ))
+                })
+                .map(|(a, b)| {
+                    (
+                        bin_of(a as u64, total, bins),
+                        bin_of(b as u64 + 1, total, bins),
+                    )
+                })
+        }
+        None => vis
+            .rows
+            .first()
+            .zip(vis.rows.last())
+            .filter(|_| utf8_len > 0)
+            .map(|(f, l)| {
+                (
+                    bin_of(f.line.offset, utf8_len, bins),
+                    bin_of(l.line.offset + l.line.len, utf8_len, bins),
+                )
+            }),
+    };
+    if let Some((a, b)) = extent {
+        let b = b.max(a);
         let r = rect_between(
             pos2(rect.left(), rect.top() + a as f32),
             pos2(rect.right(), rect.top() + (b + 1) as f32),

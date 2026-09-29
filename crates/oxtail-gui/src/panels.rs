@@ -12,7 +12,7 @@ use oxtail_search::CaseMode;
 
 use crate::colors::Colors;
 use crate::docview::{Banner, BannerKind, DocView};
-use crate::filter::FilterEntry;
+use crate::filter::{FilterEntry, FilterState};
 use crate::find::{Dir, history_step, push_history};
 use crate::util::{find_count_label, fmt_bytes, fmt_count};
 
@@ -166,65 +166,98 @@ pub fn find_bar(
     history_changed
 }
 
-/// Draws the filter panel.
+/// What a filter panel offers; the single-file and the merged tab differ.
+#[derive(Debug, Clone, Copy)]
+pub struct FilterPanelOptions {
+    /// The profile has hide rules: offer "Show hidden lines".
+    pub has_hide: bool,
+    /// Column queries (the `Q` toggle) are available.
+    pub queries: bool,
+    /// Context lines are available.
+    pub context: bool,
+    /// The running job: passing lines found so far and whether it is done.
+    pub summary: Option<(u64, bool)>,
+}
+
+/// Draws the filter panel of a single-file tab.
 pub fn filter_panel(ui: &mut Ui, tab_id: u64, view: &mut DocView, colors: &Colors, now: Instant) {
+    let opts = FilterPanelOptions {
+        has_hide: view.hl.borrow().hide.is_some(),
+        queries: true,
+        context: true,
+        summary: view
+            .filter
+            .has_job()
+            .then(|| (view.filter.set.len() as u64, view.filter.status.done)),
+    };
+    if let Some(enabled) = filter_panel_ui(ui, tab_id, &mut view.filter, &opts, colors, now) {
+        view.set_filter_view(enabled);
+    }
+}
+
+/// Draws the filter panel over `filter`. Returns `Some(enabled)` when the
+/// user flipped "Show only matching lines" (the caller switches the view and
+/// stores the flag).
+pub fn filter_panel_ui(
+    ui: &mut Ui,
+    tab_id: u64,
+    filter: &mut FilterState,
+    opts: &FilterPanelOptions,
+    colors: &Colors,
+    now: Instant,
+) -> Option<bool> {
+    let mut switch = None;
     ui.horizontal(|ui| {
         ui.strong("Filters");
-        let mut enabled = view.filter.enabled;
+        let mut enabled = filter.enabled;
         if ui
             .checkbox(&mut enabled, "Show only matching lines")
             .on_hover_text("Switch between the filtered and the full view; your position is kept")
             .changed()
         {
-            view.set_filter_view(enabled);
+            switch = Some(enabled);
         }
-        let has_hide = view.hl.borrow().hide.is_some();
-        if has_hide
+        if opts.has_hide
             && ui
-                .checkbox(&mut view.filter.show_hidden, "Show hidden lines")
+                .checkbox(&mut filter.show_hidden, "Show hidden lines")
                 .on_hover_text("Lines folded away by the profile's hide rules")
                 .changed()
         {
-            view.filter.changed();
+            filter.changed();
         }
-        if view.filter.has_job() {
-            if !view.filter.status.done {
+        if let Some((n, done)) = opts.summary {
+            if !done {
                 ui.spinner();
             }
-            let n = view.filter.set.len() as u64;
             ui.label(format!(
                 "{} lines{}",
                 fmt_count(n),
-                if view.filter.status.done {
-                    ""
-                } else {
-                    " so far"
-                }
+                if done { "" } else { " so far" }
             ));
         }
         if ui.button("Add").clicked() {
-            view.filter.entries.push(FilterEntry::default());
-            view.filter.focus_last = true;
+            filter.entries.push(FilterEntry::default());
+            filter.focus_last = true;
         }
         if ui.button("Clear").clicked() {
-            view.filter.entries.clear();
-            view.filter.changed();
+            filter.entries.clear();
+            filter.changed();
         }
         if ui
             .button("\u{d7}")
             .on_hover_text("Close the panel")
             .clicked()
         {
-            view.filter.open = false;
+            filter.open = false;
         }
     });
     let mut remove = None;
-    let problems = view.filter.problems.clone();
+    let problems = filter.problems.clone();
     let mut typed = false;
     let mut toggled = false;
-    let focus_last = std::mem::take(&mut view.filter.focus_last);
-    let last = view.filter.entries.len().saturating_sub(1);
-    for (i, e) in view.filter.entries.iter_mut().enumerate() {
+    let focus_last = std::mem::take(&mut filter.focus_last);
+    let last = filter.entries.len().saturating_sub(1);
+    for (i, e) in filter.entries.iter_mut().enumerate() {
         ui.horizontal(|ui| {
             toggled |= ui.checkbox(&mut e.enabled, "").changed();
             let label = if e.include { "Include" } else { "Exclude" };
@@ -270,12 +303,14 @@ pub fn filter_panel(ui: &mut Ui, tab_id: u64, view: &mut DocView, colors: &Color
             if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 toggled = true;
             }
-            toggled |= ui
-                .toggle_value(&mut e.query, "Q")
-                .on_hover_text(
-                    "Column query: level:ERROR  status>=500  duration>250ms  msg~\"timeout\"  -path:/health",
-                )
-                .changed();
+            if opts.queries {
+                toggled |= ui
+                    .toggle_value(&mut e.query, "Q")
+                    .on_hover_text(
+                        "Column query: level:ERROR  status>=500  duration>250ms  msg~\"timeout\"  -path:/health",
+                    )
+                    .changed();
+            }
             ui.add_enabled_ui(!e.query, |ui| {
                 toggled |= ui
                     .toggle_value(&mut e.regex, ".*")
@@ -313,35 +348,40 @@ pub fn filter_panel(ui: &mut Ui, tab_id: u64, view: &mut DocView, colors: &Color
         });
     }
     if let Some(i) = remove {
-        view.filter.entries.remove(i);
+        filter.entries.remove(i);
         toggled = true;
     }
-    ui.horizontal(|ui| {
-        ui.label("Context");
-        let mut b = view.filter.before;
-        let mut a = view.filter.after;
-        let cb = ui
-            .add(
-                egui::DragValue::new(&mut b)
-                    .range(0..=200)
-                    .prefix("before "),
-            )
-            .changed();
-        let ca = ui
-            .add(egui::DragValue::new(&mut a).range(0..=200).prefix("after "))
-            .changed();
-        if cb || ca {
-            view.filter.before = b;
-            view.filter.after = a;
-            toggled = true;
-        }
-        ui.label(RichText::new("context lines are dimmed").weak());
-    });
-    if toggled {
-        view.filter.changed();
-    } else if typed {
-        view.filter.edited(now);
+    if !opts.context {
+        ui.label(RichText::new("Context lines are not available in merged views").weak());
+    } else {
+        ui.horizontal(|ui| {
+            ui.label("Context");
+            let mut b = filter.before;
+            let mut a = filter.after;
+            let cb = ui
+                .add(
+                    egui::DragValue::new(&mut b)
+                        .range(0..=200)
+                        .prefix("before "),
+                )
+                .changed();
+            let ca = ui
+                .add(egui::DragValue::new(&mut a).range(0..=200).prefix("after "))
+                .changed();
+            if cb || ca {
+                filter.before = b;
+                filter.after = a;
+                toggled = true;
+            }
+            ui.label(RichText::new("context lines are dimmed").weak());
+        });
     }
+    if toggled {
+        filter.changed();
+    } else if typed {
+        filter.edited(now);
+    }
+    switch
 }
 
 /// Lays out a query's text with the problem span marked (red background).

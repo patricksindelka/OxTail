@@ -17,6 +17,7 @@ use oxtail_highlight::{Style, StyledSpan};
 
 use crate::collayout::{ColumnLayout, Placement};
 use crate::colors::{Colors, mix32};
+use crate::sort::{SortChoice, SortOffer, SortSpec, cycle};
 use crate::text::{JobOptions, build_job, compose};
 
 /// Horizontal padding inside a cell.
@@ -68,6 +69,8 @@ pub struct CellKey {
     pub current: bool,
     /// Context line of a filtered view.
     pub dimmed: bool,
+    /// Bits of the wrap width the cell was laid out with (`0`: no wrapping).
+    pub wrap_bits: u32,
 }
 
 struct Entry {
@@ -100,6 +103,11 @@ impl TableCache {
             let keep = self.frame.saturating_sub(2);
             self.map.retain(|_, e| e.used >= keep);
         }
+    }
+
+    /// The cached galleys with their `(line offset, column)` (for tests).
+    pub fn galleys(&self) -> impl Iterator<Item = (u64, usize, &Arc<Galley>)> {
+        self.map.iter().map(|(k, e)| (k.0, k.1, &e.galley))
     }
 
     /// Number of cached cells.
@@ -147,6 +155,8 @@ pub struct CellText<'a> {
     pub current: bool,
     /// Draw dimmed.
     pub dimmed: bool,
+    /// Wrap at this width (pixels); `None` keeps the text on one line.
+    pub wrap: Option<f32>,
 }
 
 /// Builds the galley of a cell.
@@ -166,7 +176,7 @@ pub fn layout_cell(
             colors,
             font: font.clone(),
             row_height: row_h,
-            wrap_width: None,
+            wrap_width: cell.wrap,
             dimmed: cell.dimmed,
         },
     );
@@ -190,6 +200,74 @@ pub enum HeaderEvent {
     Autofit(usize),
     /// Show all columns.
     ShowAll,
+    /// Sort the filtered view by the column with this *schema* index, or
+    /// clear the sort.
+    Sort(usize, SortChoice),
+}
+
+/// What the header needs to know about sorting.
+pub struct SortHeader<'a> {
+    /// The sort that is applied (or requested).
+    pub active: Option<SortSpec>,
+    /// Whether sorting is offered, and why not.
+    pub offer: &'a SortOffer,
+    /// Progress of a running sort, `0.0..=1.0`.
+    pub progress: Option<f32>,
+    /// A short note next to the header (why the sort is off).
+    pub note: Option<&'a str>,
+}
+
+/// The direction triangle of a sorted header cell.
+fn sort_arrow(
+    painter: &egui::Painter,
+    right: f32,
+    cy: f32,
+    descending: bool,
+    color: egui::Color32,
+) {
+    let (w, h) = (5.0, 3.5);
+    let cx = right - 10.0;
+    let pts = if descending {
+        vec![pos2(cx - w, cy - h), pos2(cx + w, cy - h), pos2(cx, cy + h)]
+    } else {
+        vec![pos2(cx - w, cy + h), pos2(cx + w, cy + h), pos2(cx, cy - h)]
+    };
+    painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+}
+
+/// The sort items of a header cell's context menu.
+fn sort_menu(ui: &mut Ui, col: usize, sort: &SortHeader<'_>, events: &mut Vec<HeaderEvent>) {
+    let avail = matches!(sort.offer, SortOffer::Available);
+    let mine = sort.active.filter(|s| s.col == col);
+    let items = [
+        (
+            "Sort ascending",
+            SortChoice::Ascending,
+            mine.is_some_and(|s| !s.descending),
+        ),
+        (
+            "Sort descending",
+            SortChoice::Descending,
+            mine.is_some_and(|s| s.descending),
+        ),
+    ];
+    for (label, choice, on) in items {
+        let mut r = ui.add_enabled(avail, egui::Button::new(label).selected(on));
+        if let SortOffer::Unavailable(why) = sort.offer {
+            r = r.on_disabled_hover_text(why);
+        }
+        if r.clicked() {
+            events.push(HeaderEvent::Sort(col, choice));
+            ui.close();
+        }
+    }
+    if ui
+        .add_enabled(sort.active.is_some(), egui::Button::new("Clear sort"))
+        .clicked()
+    {
+        events.push(HeaderEvent::Sort(col, SortChoice::Clear));
+        ui.close();
+    }
 }
 
 /// Geometry of the header for one frame.
@@ -208,6 +286,8 @@ pub struct HeaderGeometry<'a> {
     pub char_w: f32,
     /// Column placements.
     pub placements: &'a [Placement],
+    /// Sorting state and availability.
+    pub sort: &'a SortHeader<'a>,
 }
 
 /// Draws the header and returns what the user did. `id` must be unique per
@@ -221,6 +301,7 @@ pub fn draw_header(
     colors: &Colors,
     font: &FontId,
 ) -> Vec<HeaderEvent> {
+    let sort = g.sort;
     let mut events = Vec::new();
     let painter = ui.painter_at(g.rect);
     painter.rect_filled(g.rect, CornerRadius::ZERO, colors.gutter_bg);
@@ -296,11 +377,27 @@ pub fn draw_header(
             g.rect.y_range(),
             Stroke::new(1.0, colors.border),
         );
+        if let Some(s) = sort.active.filter(|s| s.col == p.col) {
+            sort_arrow(
+                &cp,
+                cell.right() - 2.0,
+                cell.center().y,
+                s.descending,
+                colors.accent,
+            );
+        }
+        let sort_hint = match sort.offer {
+            SortOffer::Available => "\nClick to sort".to_string(),
+            SortOffer::Unavailable(why) => format!("\n{why}"),
+        };
         let resp = resp.on_hover_text(format!(
-            "{} ({})\nDrag to reorder, right-click for more",
+            "{} ({})\nDrag to reorder, right-click for more{sort_hint}",
             info.name,
             kind_label(info.kind)
         ));
+        if resp.clicked() && matches!(sort.offer, SortOffer::Available) {
+            events.push(HeaderEvent::Sort(p.col, cycle(sort.active, p.col)));
+        }
         if resp.dragged()
             && let Some(pp) = resp.interact_pointer_pos()
         {
@@ -335,6 +432,8 @@ pub fn draw_header(
                 ui.close();
             }
             ui.separator();
+            sort_menu(ui, p.col, sort, &mut events);
+            ui.separator();
             columns_menu(ui, schema, layout, &mut events);
         });
         // Resize handle at the right edge.
@@ -364,6 +463,36 @@ pub fn draw_header(
     // The empty strip right of the last column also has the menu (registered
     // before the cells, which are drawn over it).
     strip.context_menu(|ui| columns_menu(ui, schema, layout, &mut events));
+    // Sort progress or note, at the right end of the strip.
+    let status = match (sort.progress, sort.note) {
+        (Some(f), _) => Some(format!(
+            "Sorting\u{2026} {:.0}%",
+            (f * 100.0).clamp(0.0, 100.0)
+        )),
+        (None, Some(n)) => Some(n.to_string()),
+        _ => None,
+    };
+    if let Some(text) = status {
+        let galley = painter.layout_no_wrap(text, font.clone(), colors.text);
+        let size = galley.size() + vec2(CELL_PAD * 2.0, 2.0);
+        let pill = Rect::from_min_size(
+            pos2(
+                g.text_right - size.x - 4.0,
+                g.rect.center().y - size.y * 0.5,
+            ),
+            size,
+        )
+        .intersect(g.rect);
+        painter.rect_filled(pill, CornerRadius::same(3), colors.background);
+        painter.galley(
+            pos2(
+                pill.left() + CELL_PAD,
+                pill.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            colors.text,
+        );
+    }
     // Drop indicator while dragging a header cell.
     if let Some(x) = drag_target {
         let x_rel = x - g.text_left;
@@ -460,6 +589,8 @@ pub fn apply_events(
                     c.visible = true;
                 }
             }
+            // Handled by the view, not the layout.
+            HeaderEvent::Sort(..) => continue,
         }
         changed = true;
     }
@@ -535,5 +666,14 @@ mod tests {
         apply_events(&mut l, &schema, &[HeaderEvent::Reorder(2, 0)], &fit);
         assert_eq!(l.cols[0].col, 2);
         assert!(!apply_events(&mut l, &schema, &[], &fit));
+        // Sorting is the view's business: the layout is left alone.
+        let before = l.cols.clone();
+        assert!(!apply_events(
+            &mut l,
+            &schema,
+            &[HeaderEvent::Sort(1, crate::sort::SortChoice::Ascending)],
+            &fit
+        ));
+        assert_eq!(l.cols, before);
     }
 }

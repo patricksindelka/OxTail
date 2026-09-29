@@ -396,6 +396,64 @@ impl Fetcher {
     }
 }
 
+/// Retries (with [`READ_RETRY_SLEEP`]) when a source returns nothing for lines
+/// the merge says exist (a source that is being rotated).
+const READ_RETRIES: u32 = 40;
+/// Sleep between such retries.
+const READ_RETRY_SLEEP: Duration = Duration::from_millis(25);
+
+/// Reads the text of `entries`, aligned with them; a line that cannot be read
+/// stays `None`.
+///
+/// A read of a document is capped in size, so a run of long lines comes back
+/// as a prefix: each run is read again from the first line not yet received
+/// until it is complete. Only a read that returns nothing is retried after a
+/// pause, a bounded number of times. A document whose generation changed
+/// under the read (truncated, rotated, re-decoded: the merge is about to be
+/// rebuilt) is not read further. `stop` is polled between reads.
+pub fn read_entries_text(
+    docs: &[Arc<Document>],
+    entries: &[MergedEntry],
+    stop: &dyn Fn() -> bool,
+) -> Vec<Option<String>> {
+    let mut text: HashMap<(usize, u64), String> = HashMap::new();
+    'runs: for p in plan_reads(entries) {
+        let Some(doc) = docs.get(p.source) else {
+            continue;
+        };
+        let end = p.first.saturating_add(p.count as u64);
+        let mut next = p.first;
+        let mut empty_reads = 0;
+        while next < end {
+            if stop() {
+                break 'runs;
+            }
+            let want = usize::try_from(end - next).unwrap_or(usize::MAX);
+            let (g, lines) = doc.read_lines_blocking_with_generation(next, want);
+            if g != doc.generation() {
+                break;
+            }
+            let Some(last) = lines.last().map(|l| l.number) else {
+                empty_reads += 1;
+                if empty_reads > READ_RETRIES {
+                    break;
+                }
+                std::thread::sleep(READ_RETRY_SLEEP);
+                continue;
+            };
+            empty_reads = 0;
+            for l in lines {
+                text.insert((p.source, l.number), l.text);
+            }
+            next = last + 1;
+        }
+    }
+    entries
+        .iter()
+        .map(|e| text.remove(&(e.source(), e.line())))
+        .collect()
+}
+
 /// A text search across the merged order, run on a worker. Matches are
 /// indices into the store, ascending. The worker keeps following the store,
 /// so lines that are merged later are searched too. Dropping it stops the
@@ -472,6 +530,18 @@ impl MergedSearch {
             .copied()
     }
 
+    /// The first (`forward`) or last of `candidates` (ascending merged
+    /// indices) that is a match, taking the lock once.
+    pub fn first_match_in(&self, candidates: &[usize], forward: bool) -> Option<usize> {
+        let m = self.matches.lock().ok()?;
+        let hit = |i: &&usize| m.binary_search(i).is_ok();
+        if forward {
+            candidates.iter().find(hit).copied()
+        } else {
+            candidates.iter().rev().find(hit).copied()
+        }
+    }
+
     /// Whether `index` is a match.
     pub fn contains(&self, index: usize) -> bool {
         self.matches
@@ -504,18 +574,15 @@ fn search_loop(
         }
         let end = (pos + BLOCK).min(len);
         let entries = store.slice(pos..end);
-        let mut text: HashMap<(usize, u64), String> = HashMap::new();
-        for p in plan_reads(&entries) {
-            let Some(doc) = docs.get(p.source) else {
-                continue;
-            };
-            for l in doc.read_lines_blocking(p.first, p.count) {
-                text.insert((p.source, l.number), l.text);
-            }
+        let texts = read_entries_text(docs, &entries, &|| {
+            cancel.load(Ordering::Relaxed) || store.epoch() != epoch
+        });
+        if cancel.load(Ordering::Relaxed) || store.epoch() != epoch {
+            return;
         }
         let mut found = Vec::new();
-        for (k, e) in entries.iter().enumerate() {
-            if let Some(t) = text.get(&(e.source(), e.line()))
+        for (k, t) in texts.iter().enumerate() {
+            if let Some(t) = t
                 && matcher.matches(t.as_bytes())
             {
                 found.push(pos + k);
@@ -627,7 +694,15 @@ mod tests {
         let a = Arc::new(Document::from_source(mem_a.clone(), "a.log"));
         let b = Arc::new(Document::from_source(mem_b.clone(), "b.log"));
         let store = Arc::new(MergedStore::default());
-        let _w = MergeWorker::start(vec![a, b], Arc::clone(&store), opts(), Arc::new(|| {}));
+        // A quiet source holds the others back only for the idle delay; 30 ms
+        // was shorter than a slow runner takes to notice a's new line (CI run
+        // 15, macos-latest), so b1 got merged first. 2 s keeps the ordering
+        // under test deterministic.
+        let opts = MergeOptions {
+            idle_delay: Duration::from_secs(2),
+            ..opts()
+        };
+        let _w = MergeWorker::start(vec![a, b], Arc::clone(&store), opts, Arc::new(|| {}));
         wait_len(&store, 2);
         mem_b.append(ts_line(3, "b1").as_bytes());
         mem_a.append(ts_line(2, "a1").as_bytes());

@@ -8,6 +8,7 @@
 //! * [`RecordGrouper`]: attach continuation lines (stack traces) to records.
 //! * [`Query`]: the small typed filter language from PLAN.md section 8.4.
 //! * [`TableStats`] / [`ColumnStats`]: bounded-memory column statistics.
+//! * [`sort_key`] / [`SortKey`]: typed keys for sorting rows by a column.
 //! * [`export_csv`] / [`export_jsonl`]: streaming export.
 //! * [`format`] helpers and [`Level`] normalisation.
 //!
@@ -26,6 +27,7 @@ mod model;
 mod parsers;
 mod quantity;
 mod query;
+mod sortkey;
 mod stats;
 mod timestamp;
 
@@ -41,5 +43,6 @@ pub use parsers::{
 };
 pub use quantity::{Quantity, Unit, parse_bytes, parse_duration_ns, parse_quantity};
 pub use query::{Query, QueryError};
+pub use sortkey::{MAX_KEY_CHARS, Num, SortKey, TextKey, sort_key};
 pub use stats::{ColumnStats, Percentiles, TableStats, TopValue};
 pub use timestamp::{Rfc3339Fallback, TimestampParser};

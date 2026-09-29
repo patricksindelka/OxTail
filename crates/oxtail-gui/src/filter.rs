@@ -230,10 +230,16 @@ pub struct FilterState {
     pub hold_until: Option<Instant>,
     /// Bumped whenever the job restarts.
     pub epoch: u64,
+    /// Column queries are not supported here (merged tabs): such entries are
+    /// reported as problems and skipped.
+    pub no_queries: bool,
     /// What column queries run against (the tab's parser and time parser).
     columns: Option<Arc<QueryContext>>,
     active: Option<ActiveFilter>,
 }
+
+/// The problem reported for column queries where they are not supported.
+pub const NO_QUERIES_MESSAGE: &str = "Column queries need a single-file tab";
 
 impl Default for FilterState {
     fn default() -> Self {
@@ -256,6 +262,7 @@ impl Default for FilterState {
             focus_last: false,
             hold_until: None,
             epoch: 0,
+            no_queries: false,
             columns: None,
             active: None,
         }
@@ -299,6 +306,16 @@ impl FilterState {
         let mut problems = Vec::new();
         for (i, e) in self.entries.iter().enumerate() {
             if !e.enabled || e.text.is_empty() {
+                continue;
+            }
+            if e.query && self.no_queries {
+                problems.push((
+                    i,
+                    QueryProblem {
+                        message: NO_QUERIES_MESSAGE.into(),
+                        span: None,
+                    },
+                ));
                 continue;
             }
             if e.query {
@@ -391,6 +408,26 @@ impl FilterState {
             );
         }
         s
+    }
+
+    /// A string that changes whenever the enabled entries do (for callers
+    /// that have no context lines, hide rules or column parser).
+    pub fn entries_signature(&self) -> String {
+        let mut s = String::new();
+        for e in self
+            .entries
+            .iter()
+            .filter(|e| e.enabled && !e.text.is_empty())
+        {
+            s.push_str(&e.to_query_string());
+            s.push('\u{1}');
+        }
+        s
+    }
+
+    /// Whether some enabled entry has text.
+    pub fn has_entries(&self) -> bool {
+        self.entries.iter().any(|e| e.enabled && !e.text.is_empty())
     }
 
     /// Whether the filtered view is the one to show right now: a job exists
@@ -613,6 +650,26 @@ mod tests {
             vec![offset_of(t, "ERROR db"), offset_of(t, "ERROR user")]
         );
         assert!(f.view_active());
+    }
+
+    #[test]
+    fn column_queries_can_be_refused() {
+        let mut f = FilterState::default();
+        f.no_queries = true;
+        f.entries = vec![
+            FilterEntry::column_query("level:ERROR", true),
+            FilterEntry::include("WARN"),
+        ];
+        let (stack, problems) = f.build_stack(None);
+        assert_eq!(stack.filters.len(), 1);
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].0, 0);
+        assert_eq!(problems[0].1.message, NO_QUERIES_MESSAGE);
+        assert!(f.has_entries());
+        assert_ne!(
+            f.entries_signature(),
+            FilterState::default().entries_signature()
+        );
     }
 
     #[test]
