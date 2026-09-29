@@ -14,8 +14,10 @@
 //! a line too (it may still be growing while following).
 
 pub mod cache;
+pub mod encoding;
 pub mod error;
 pub mod index;
+pub mod line;
 pub mod source;
 
 pub use error::CoreError;
