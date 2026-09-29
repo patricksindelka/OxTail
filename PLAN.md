@@ -464,7 +464,7 @@ local socket or named pipe).
 
 ## 11. Configuration
 
-- `config.toml` in the data folder chosen as described in section 3.2: next to
+- `settings.toml` in the data folder chosen as described in section 3.2: next to
   the executable in portable mode (the default for the `.zip`), otherwise the
   platform config directory (`directories` crate).
 - `profiles/*.toml` for profiles, `themes/*.toml` for themes, and `session.json`
