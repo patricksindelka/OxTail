@@ -171,4 +171,29 @@ mod tests {
         assert_eq!(click_fraction(10.0, 0.0, 0.0), 0.0);
         assert_eq!(click_fraction(110.0, 10.0, 200.0), 0.5);
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Binning through `rank` agrees with counting every offset.
+            #[test]
+            fn binning_matches_the_naive_count(
+                offsets in proptest::collection::vec(0u64..5000, 0..300),
+                len in 1u64..6000,
+                bins in 1usize..200,
+            ) {
+                let set = MatchSet::from_offsets(offsets.clone());
+                let mut dedup = offsets;
+                dedup.sort_unstable();
+                dedup.dedup();
+                let mut want = vec![0u32; bins];
+                for o in dedup {
+                    want[bin_of(o, len, bins)] += 1;
+                }
+                prop_assert_eq!(bin_matches(&set, len, bins), want);
+            }
+        }
+    }
 }

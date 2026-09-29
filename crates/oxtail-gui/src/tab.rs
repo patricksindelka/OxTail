@@ -56,6 +56,9 @@ pub struct Tab {
     pub forced_profile: Option<String>,
     /// The encoding label the user picked (kept in the session).
     pub forced_encoding: Option<String>,
+    /// The rules were edited and applied without saving: a profile detected
+    /// later must not replace them.
+    pub customized: bool,
 }
 
 impl Tab {
@@ -69,6 +72,7 @@ impl Tab {
             forced_encoding: init.encoding.clone(),
             content: TabContent::Opening(init),
             badge: 0,
+            customized: false,
         }
     }
 
@@ -105,6 +109,9 @@ impl Tab {
 
 /// Selects and applies the profile of a freshly read first-lines sample.
 pub fn apply_sniffed_profile(tab: &mut Tab, profiles: &ProfileSet, lines: &[String]) {
+    if tab.customized {
+        return;
+    }
     let forced = tab.forced_profile.clone();
     let path = tab
         .path
@@ -148,11 +155,21 @@ pub fn build_session(
         match &tab.content {
             TabContent::Ready(v) => {
                 st.follow = v.follow;
+                // While the index is still running the top line's number is
+                // only an estimate: keep the last saved position then.
                 st.scroll_anchor_line = v
                     .cache
                     .get(v.pos.top)
                     .filter(|l| l.number_exact)
-                    .map_or(0, |l| l.number);
+                    .map_or_else(
+                        || {
+                            base.tabs
+                                .iter()
+                                .find(|t| &t.path == path)
+                                .map_or(0, |t| t.scroll_anchor_line)
+                        },
+                        |l| l.number,
+                    );
                 st.filters = v.filter.to_query_strings();
                 st.search_query = (!v.find.text.is_empty()).then(|| v.find.text.clone());
                 let marks: Vec<Bookmark> = v
@@ -245,6 +262,7 @@ mod tests {
             badge: 0,
             forced_profile: None,
             forced_encoding: None,
+            customized: false,
         }
     }
 

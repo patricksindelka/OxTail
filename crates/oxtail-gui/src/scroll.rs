@@ -813,4 +813,56 @@ mod tests {
             other => panic!("{other:?}"),
         }
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Scrolling a fully cached, uniform document equals moving a
+            /// clamped pixel offset.
+            #[test]
+            fn scroll_by_matches_a_pixel_offset(
+                lines in 1u64..60,
+                steps in proptest::collection::vec(-400.0f32..400.0, 1..30),
+            ) {
+                let c = cache(0, lines);
+                let space = full(lines);
+                let mut pos = Pos::at(0);
+                let mut y = 0.0f32;
+                let max_y = (lines - 1) as f32 * 10.0 + 9.0;
+                for dy in steps {
+                    let dy = dy.round();
+                    let out = scroll_by(&mut pos, dy, &space, &c, &h);
+                    prop_assert_eq!(out.remainder, 0.0);
+                    y = (y + dy).clamp(0.0, max_y);
+                    let got = (pos.top / W) as f32 * 10.0 + pos.sub_px;
+                    prop_assert!((got - y).abs() < 1e-3, "got {} expected {}", got, y);
+                    prop_assert!(pos.sub_px >= 0.0 && pos.sub_px < 10.0);
+                }
+            }
+
+            /// The rows laid out from any position tile the viewport without
+            /// gaps.
+            #[test]
+            fn layout_rows_tile_the_viewport(
+                lines in 1u64..40,
+                top in 0u64..40,
+                sub in 0.0f32..9.9,
+                view_h in 1.0f32..300.0,
+            ) {
+                let c = cache(0, lines);
+                let space = full(lines);
+                let p = Pos { top: (top % lines) * W, sub_px: sub };
+                let v = layout_rows(&p, &space, &c, view_h, &h);
+                prop_assert!(!v.rows.is_empty());
+                prop_assert_eq!(v.rows[0].y, -sub);
+                for w in v.rows.windows(2) {
+                    prop_assert_eq!(w[0].y + w[0].height, w[1].y);
+                }
+                let last = v.rows.last().unwrap();
+                prop_assert!(last.y + last.height >= view_h || v.reaches_end);
+            }
+        }
+    }
 }

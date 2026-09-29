@@ -377,3 +377,63 @@ fn zoom_keys_change_the_font_size_within_limits() {
     h.step();
     assert_eq!(h.state().settings().font_size, start);
 }
+
+#[test]
+fn a_command_line_filter_and_profile_apply_to_the_new_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cli.log");
+    std::fs::write(&path, sample(300)).unwrap();
+    let mut app = new_app();
+    app.open_request(OpenRequest {
+        files: vec![path],
+        filter: Some("needle".into()),
+        profile: Some("Syslog".into()),
+        ..OpenRequest::default()
+    });
+    let mut h = harness(app);
+    step_until(&mut h, "filtered tab", |a| {
+        a.active_view().is_some_and(|v| {
+            v.is_filtered()
+                && v.filter.status.done
+                && !v.last_rows.is_empty()
+                && v.last_rows.iter().all(|l| l.text.contains("needle"))
+        })
+    });
+    let view = h.state().active_view().unwrap();
+    assert!(view.filter.open);
+    assert_eq!(view.filter.entries.len(), 1);
+    assert_eq!(view.hl.borrow().profile.as_deref(), Some("Syslog"));
+    // The forced profile is remembered for the session.
+    let session = h.state().current_session();
+    assert_eq!(session.tabs[0].profile.as_deref(), Some("Syslog"));
+    assert_eq!(session.tabs[0].filters, vec!["needle"]);
+}
+
+#[test]
+fn the_profile_is_detected_from_the_first_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("access.log");
+    let line =
+        "127.0.0.1 - - [10/Oct/2000:13:55:36 -0700] \"GET /a HTTP/1.0\" 200 2326 \"-\" \"curl\"\n";
+    std::fs::write(&path, line.repeat(40)).unwrap();
+    let mut app = new_app();
+    app.open_request(OpenRequest::file(&path));
+    let mut h = harness(app);
+    step_until(&mut h, "profile", |a| {
+        a.active_view()
+            .is_some_and(|v| v.hl.borrow().profile.is_some())
+    });
+    let name = h
+        .state()
+        .active_view()
+        .unwrap()
+        .hl
+        .borrow()
+        .profile
+        .clone()
+        .unwrap();
+    assert!(
+        name.to_lowercase().contains("nginx") || name.to_lowercase().contains("apache"),
+        "{name}"
+    );
+}

@@ -691,6 +691,13 @@ impl DocView {
             }
         }
 
+        // A changed font size can leave the pixel offset larger than the row.
+        if let Some(l) = self.cache.get(self.pos.top)
+            && self.pos.sub_px >= height_of(l).max(1.0)
+        {
+            self.pos.sub_px = 0.0;
+        }
+
         let vis = layout_rows(&self.pos, &space, &self.cache, m.view_h, height_of);
 
         // Reached the bottom by scrolling: resume following.
@@ -717,7 +724,8 @@ impl DocView {
             return;
         }
         if let Some(n) = self.initial_line.take() {
-            self.jump_to_line(n, true);
+            // The saved anchor is the top line: put it back at the top.
+            self.jump_to_line(n, false);
         }
         if let Some(n) = self.start_lines
             && !self.has_pending(|k| matches!(k, ReqKind::Tail))
@@ -852,6 +860,9 @@ impl DocView {
     pub fn toggle_follow(&mut self) {
         if self.follow {
             self.pause_follow();
+            // A deliberate pause stays paused even when the whole file is in
+            // view; only scrolling down to the end resumes it.
+            self.resume_on_bottom = false;
         } else {
             self.resume_follow();
         }
@@ -1764,7 +1775,8 @@ mod tests {
         let vis = run_until(&mut v, |_, vis| {
             vis.rows.first().is_some_and(|r| r.line.number > 200)
         });
-        assert!(numbers(&vis).contains(&300));
+        // The saved anchor is the top line.
+        assert_eq!(numbers(&vis)[0], 300);
     }
 
     #[test]
@@ -1880,5 +1892,163 @@ mod tests {
         run_until(&mut v, |v, _| v.snapshot.lines.known == 12);
         assert_eq!(v.take_new_lines(), Some((0, 10, 2)));
         assert_eq!(v.take_new_lines(), None);
+    }
+
+    #[test]
+    fn a_manual_pause_sticks_even_when_everything_is_visible() {
+        let (doc, mem) = doc_with(5);
+        let mut v = DocView::new(doc, &init(true));
+        run_until(&mut v, |_, vis| vis.rows.len() == 5);
+        v.toggle_follow();
+        assert!(!v.follow);
+        for _ in 0..5 {
+            v.pump(Instant::now());
+            v.update_rows(M, &h);
+        }
+        assert!(
+            !v.follow,
+            "pausing must not be undone by the view being at the end"
+        );
+        // New lines are counted, and F resumes.
+        mem.append(b"x\ny\n");
+        run_until(&mut v, |v, _| v.new_lines_while_paused() >= 2);
+        v.toggle_follow();
+        assert!(v.follow);
+        assert_eq!(v.new_lines_while_paused(), 0);
+    }
+
+    // ---- a big file whose index is still running (byte-position scrolling)
+
+    /// A source whose reads are slow, so the line index stays incomplete for
+    /// a couple of seconds and the view must work in byte-position mode.
+    struct SlowSource {
+        inner: MemSource,
+        delay: Duration,
+    }
+
+    impl oxtail_core::ReadAt for SlowSource {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(self.delay);
+            self.inner.read_at(offset, buf)
+        }
+
+        fn len(&self) -> std::io::Result<u64> {
+            self.inner.len()
+        }
+    }
+
+    const BIG_LINES: u64 = 1_500_000;
+    const BIG_LINE_LEN: u64 = 40;
+
+    /// Lines of exactly 40 bytes carrying their own number.
+    fn big_doc() -> Arc<Document> {
+        let mut data = Vec::with_capacity((BIG_LINES * BIG_LINE_LEN) as usize);
+        for i in 0..BIG_LINES {
+            data.extend_from_slice(format!("line {i:08} {}\n", "x".repeat(25)).as_bytes());
+        }
+        assert_eq!(data.len() as u64, BIG_LINES * BIG_LINE_LEN);
+        Arc::new(Document::from_source(
+            Arc::new(SlowSource {
+                inner: MemSource::new(data),
+                delay: Duration::from_millis(8),
+            }),
+            "big.log",
+        ))
+    }
+
+    fn line_no(text: &str) -> u64 {
+        text[5..13].parse().expect("line text carries its number")
+    }
+
+    /// The rows are consecutive lines and (when exact) numbered correctly.
+    fn check_rows(vis: &Visible) -> u64 {
+        assert!(!vis.rows.is_empty());
+        let first = line_no(&vis.rows[0].line.text);
+        for (i, r) in vis.rows.iter().enumerate() {
+            assert_eq!(
+                line_no(&r.line.text),
+                first + i as u64,
+                "rows are consecutive"
+            );
+            if r.line.number_exact {
+                assert_eq!(r.line.number, first + i as u64, "exact numbers are right");
+            }
+        }
+        first
+    }
+
+    #[test]
+    fn scrolling_works_before_the_index_is_complete() {
+        let mut v = DocView::new(big_doc(), &init(true));
+        // The last screen appears at once, with estimated line numbers.
+        let vis = run_until(&mut v, |_, vis| vis.rows.len() == 10);
+        let first = check_rows(&vis);
+        assert_eq!(first + 10, BIG_LINES, "the view starts at the tail");
+        assert!(v.follow);
+        let began_inexact = !v.snapshot.lines.exact;
+        assert!(
+            began_inexact,
+            "the index must still be running for this test"
+        );
+        assert!(matches!(v.scroll_space(&vis), ScrollSpace::Bytes { .. }));
+
+        // Scroll up 300 lines: the rows before the tail are read by byte position.
+        v.scroll_px(-16.0 * 300.0);
+        let vis = run_until(&mut v, |_, vis| {
+            vis.rows.len() == 10
+                && vis.rows[0].line.text.len() > 5
+                && line_no(&vis.rows[0].line.text) <= BIG_LINES - 300 - 10
+        });
+        let first = check_rows(&vis);
+        assert!(!v.follow);
+        assert!(
+            (BIG_LINES - 320..=BIG_LINES - 300).contains(&first),
+            "landed at {first}"
+        );
+
+        // Scroll back down 100 lines.
+        v.scroll_px(16.0 * 100.0);
+        let target = first + 100;
+        let vis = run_until(&mut v, |v, vis| {
+            vis.rows.len() == 10 && line_no(&vis.rows[0].line.text) == target && v.pending_px == 0.0
+        });
+        check_rows(&vis);
+
+        // Drag the thumb to the middle of the file.
+        let space = v.scroll_space(&vis);
+        v.scroll_to_thumb(0.5, space);
+        let vis = run_until(&mut v, |_, vis| {
+            vis.rows.len() == 10 && (600_000..900_000).contains(&line_no(&vis.rows[0].line.text))
+        });
+        let mid = check_rows(&vis);
+        assert!(
+            (BIG_LINES / 2).abs_diff(mid) < BIG_LINES / 50,
+            "the middle thumb position lands near the middle line, got {mid}"
+        );
+        // Line numbers there are estimates until the index arrives.
+        v.thumb_drag = None;
+
+        // Scroll a page down and up again around the middle.
+        v.page(true);
+        let want = mid + 9;
+        let vis = run_until(&mut v, |v, vis| {
+            vis.rows.len() == 10 && line_no(&vis.rows[0].line.text) == want && v.pending_px == 0.0
+        });
+        check_rows(&vis);
+        v.page(false);
+        let vis = run_until(&mut v, |v, vis| {
+            vis.rows.len() == 10 && line_no(&vis.rows[0].line.text) == mid && v.pending_px == 0.0
+        });
+        check_rows(&vis);
+
+        // Once the index is complete the numbers become exact and match the text.
+        let vis = run_until(&mut v, |v, vis| {
+            v.snapshot.lines.exact
+                && vis.rows.len() == 10
+                && vis.rows.iter().all(|r| r.line.number_exact)
+        });
+        check_rows(&vis);
+        assert_eq!(v.snapshot.lines.known, BIG_LINES);
+        assert!(matches!(v.scroll_space(&vis), ScrollSpace::Lines { .. }));
     }
 }

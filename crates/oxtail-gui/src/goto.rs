@@ -97,4 +97,27 @@ mod tests {
         assert_eq!(resolve(Goto::Percent(0.0), 7, 1000), 0);
         assert_eq!(resolve(Goto::Line(5), 0, 0), 0);
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Parsing never panics and a resolved line is always inside the
+            /// document.
+            #[test]
+            fn resolve_is_always_in_range(input in "\\PC{0,20}", current in 0u64..1_000_000, total in 0u64..1_000_000) {
+                if let Some(g) = parse(&input) {
+                    let line = resolve(g, current, total);
+                    prop_assert!(total == 0 && line == 0 || line < total);
+                }
+            }
+
+            /// Plain numbers parse to themselves.
+            #[test]
+            fn numbers_round_trip(n in 0u64..u64::MAX / 2) {
+                prop_assert_eq!(parse(&n.to_string()), Some(Goto::Line(n)));
+            }
+        }
+    }
 }

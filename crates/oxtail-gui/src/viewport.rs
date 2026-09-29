@@ -366,4 +366,43 @@ mod tests {
         assert_eq!(digits(999_999), 6);
         assert_eq!(digits(u64::MAX), 20);
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// The thumb for a position maps back to the same row.
+            #[test]
+            fn line_thumb_round_trips(total in 1u64..10_000_000, visible in 1u64..500, top_frac in 0.0f64..1.0) {
+                prop_assume!(total > visible);
+                let top = ((total - visible) as f64 * top_frac) as u64;
+                let s = ScrollSpace::Lines { total, top, visible };
+                let back = lines_target(s.thumb().position, total, visible);
+                // Rounding to the nearest row may differ by one for huge files.
+                prop_assert!(back.abs_diff(top) <= 1 + (total / 1_000_000_000_000));
+            }
+
+            /// Thumb pixels always lie on the track.
+            #[test]
+            fn thumb_stays_on_the_track(
+                track in 0.0f32..2000.0,
+                pos in -1.0f64..2.0,
+                size in -1.0f64..2.0,
+                min in 0.0f32..60.0,
+            ) {
+                let t = thumb_px(track, ThumbFractions { position: pos, size }, min);
+                prop_assert!(t.start >= 0.0);
+                prop_assert!(t.len >= 0.0);
+                prop_assert!(t.start + t.len <= track + 1e-3);
+            }
+
+            /// Byte-fraction targets stay in range for any input.
+            #[test]
+            fn byte_target_is_a_fraction(p in -5.0f64..5.0, vis in 0u64..1_000_000, len in 0u64..u64::MAX / 2) {
+                let f = bytes_target(p, vis, len);
+                prop_assert!((0.0..=1.0).contains(&f));
+            }
+        }
+    }
 }

@@ -357,4 +357,55 @@ mod tests {
         assert_eq!(c.get(10).unwrap().text, "changed");
         assert_eq!(c.len(), 3);
     }
+
+    mod props {
+        use super::super::testutil::synthetic;
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Whatever is inserted, invalidated, dropped or trimmed, the
+            /// number index only ever points at cached lines with that number
+            /// and the size bound holds after a trim.
+            #[test]
+            fn the_number_index_stays_consistent(
+                ops in proptest::collection::vec((0u8..4, 0u64..80, 1u64..12, any::<bool>()), 1..40),
+                cap in 16usize..60,
+            ) {
+                let mut c = LineCache::new(0, cap);
+                for (op, first, count, exact) in ops {
+                    match op {
+                        0 => {
+                            let mut lines = synthetic(first, count, 10);
+                            for l in &mut lines {
+                                l.number_exact = exact;
+                            }
+                            c.insert(0, lines);
+                        }
+                        1 => c.invalidate_from(first * 10),
+                        2 => c.drop_inexact(),
+                        _ => {
+                            c.trim(first * 10);
+                            prop_assert!(c.len() <= cap.max(16));
+                        }
+                    }
+                    for n in 0..100u64 {
+                        if let Some(l) = c.get_number(n) {
+                            prop_assert_eq!(l.number, n);
+                            prop_assert!(l.number_exact);
+                            prop_assert!(c.get(l.offset).is_some());
+                        }
+                    }
+                    // Every exact cached line is found by its number.
+                    for n in 0..100u64 {
+                        if let Some(l) = c.get(n * 10)
+                            && l.number_exact
+                        {
+                            prop_assert_eq!(c.get_number(l.number).map(|x| x.offset), Some(l.offset));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

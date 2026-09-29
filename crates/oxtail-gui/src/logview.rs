@@ -339,10 +339,8 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         id.with("text"),
         Sense::click_and_drag(),
     );
-    let hovered = text_resp.hovered()
-        || ui
-            .input(|i| i.pointer.hover_pos())
-            .is_some_and(|p| full.contains(p));
+    // Over the view (also its scrollbars), and not under a popup or window.
+    let hovered = ui.rect_contains_pointer(full);
     if hovered {
         let delta = ui.input(|i| i.smooth_scroll_delta);
         if delta.y != 0.0 {

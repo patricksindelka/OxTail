@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use egui::text::{CCursor, CCursorRange};
+use egui::widgets::text_edit::TextEditState;
 use egui::{Color32, Id, Key, Modifiers, RichText, TextEdit, Ui};
 use oxtail_config::ProfileSet;
 use oxtail_core::{DocState, EncodingChoice, LineEnding, TextEncoding};
@@ -25,8 +26,6 @@ fn select_all_text(ctx: &egui::Context, id: Id, len_chars: usize) {
         state.store(ctx, id);
     }
 }
-
-use egui::widgets::text_edit::TextEditState;
 
 /// Draws the find bar. Returns `true` when the search history changed.
 pub fn find_bar(

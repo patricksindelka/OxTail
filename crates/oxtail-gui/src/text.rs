@@ -386,4 +386,61 @@ mod tests {
         let empty = build_job("", &[], false, &o);
         empty.debug_sanity_check();
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn spans(len: usize) -> impl Strategy<Value = Vec<StyledSpan>> {
+            // Sorted, non-overlapping spans made from random cut points.
+            proptest::collection::vec(0..=len, 0..8).prop_map(move |mut cuts| {
+                cuts.sort_unstable();
+                cuts.chunks(2)
+                    .filter(|c| c.len() == 2 && c[0] < c[1])
+                    .enumerate()
+                    .map(|(i, c)| StyledSpan {
+                        range: c[0]..c[1],
+                        style: if i % 2 == 0 {
+                            red()
+                        } else {
+                            Style::default().bold()
+                        },
+                    })
+                    .collect()
+            })
+        }
+
+        proptest! {
+            /// The segments always tile `0..len` exactly, and each one has the
+            /// naive layered style of its first byte.
+            #[test]
+            fn segments_partition_the_text(
+                len in 0usize..80,
+                a in spans(80),
+                b in spans(80),
+                m in spans(80),
+                current in any::<bool>(),
+            ) {
+                let search: Vec<Range<usize>> = m.iter().map(|s| s.range.clone()).collect();
+                let segs = compose(len, &[&a, &b], &search, current);
+                let mut at = 0;
+                for s in &segs {
+                    prop_assert_eq!(s.range.start, at);
+                    prop_assert!(s.range.start < s.range.end);
+                    at = s.range.end;
+                    // Naive: layer every span covering the first byte.
+                    let mut want = Style::default();
+                    for layer in [&a, &b] {
+                        if let Some(sp) = layer.iter().find(|sp| sp.range.contains(&s.range.start)) {
+                            want = want.layer(&sp.style);
+                        }
+                    }
+                    prop_assert_eq!(s.style, want);
+                    let is_match = search.iter().any(|r| r.contains(&s.range.start));
+                    prop_assert_eq!(s.search != MatchKind::None, is_match);
+                }
+                prop_assert_eq!(at, len);
+            }
+        }
+    }
 }

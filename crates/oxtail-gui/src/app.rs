@@ -50,8 +50,10 @@ pub enum AppMsg {
         /// The document or a user-presentable error.
         result: Result<Arc<Document>, String>,
     },
-    /// Files chosen in the open dialog.
-    Picked(Vec<PathBuf>),
+    /// Files to open (chosen in the dialog, or found in dropped folders).
+    Files(Vec<PathBuf>),
+    /// The open dialog was closed.
+    DialogDone,
     /// The config watcher is running.
     Watcher(ConfigWatcher, Receiver<ConfigChanged>),
 }
@@ -547,7 +549,10 @@ impl OxTailApp {
                     .into_iter()
                     .map(|h| h.path().to_path_buf())
                     .collect();
-                let _ = tx.send(AppMsg::Picked(paths));
+                if !paths.is_empty() {
+                    let _ = tx.send(AppMsg::Files(paths));
+                }
+                let _ = tx.send(AppMsg::DialogDone);
                 wake();
             });
         if spawned.is_err() {
@@ -612,6 +617,11 @@ impl OxTailApp {
         &self.settings
     }
 
+    /// Names of the available profiles (user profiles first).
+    pub fn profile_names(&self) -> Vec<String> {
+        self.profiles.profiles().map(|p| p.name.clone()).collect()
+    }
+
     // ------------------------------------------------------- frame plumbing
 
     /// Everything that happens before drawing: messages, events, keys.
@@ -635,15 +645,13 @@ impl OxTailApp {
         while let Ok(msg) = self.msg_rx.try_recv() {
             match msg {
                 AppMsg::Opened { tab_id, result } => self.finish_open(tab_id, result),
-                AppMsg::Picked(paths) => {
-                    self.file_dialog_open = false;
-                    if !paths.is_empty() {
-                        self.open_request(OpenRequest {
-                            files: paths,
-                            ..OpenRequest::default()
-                        });
-                    }
+                AppMsg::Files(paths) => {
+                    self.open_request(OpenRequest {
+                        files: paths,
+                        ..OpenRequest::default()
+                    });
                 }
+                AppMsg::DialogDone => self.file_dialog_open = false,
                 AppMsg::Watcher(w, rx) => {
                     self._config_watcher = Some(w);
                     self.config_rx = Some(rx);
@@ -706,7 +714,14 @@ impl OxTailApp {
     fn reapply_profiles(&mut self) {
         let profiles = Arc::clone(&self.profiles);
         for tab in &mut self.tabs {
-            let name = tab.view().and_then(|v| v.hl.borrow().profile.clone());
+            if tab.customized {
+                continue;
+            }
+            // The profile the user chose wins over whatever is showing now.
+            let name = tab
+                .forced_profile
+                .clone()
+                .or_else(|| tab.view().and_then(|v| v.hl.borrow().profile.clone()));
             let Some(view) = tab.view_mut() else { continue };
             if let Some(name) = name
                 && let Some(p) = profiles.by_name(&name)
@@ -735,11 +750,24 @@ impl OxTailApp {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
-        if !dropped.is_empty() {
-            self.open_request(OpenRequest {
-                files: dropped,
-                ..OpenRequest::default()
+        if dropped.is_empty() {
+            return;
+        }
+        // A dropped folder opens the files inside it. Finding out what is a
+        // folder touches the file system, so a worker does it.
+        let tx = self.msg_tx.clone();
+        let wake = self.waker();
+        let spawned = std::thread::Builder::new()
+            .name("oxtail-drop".into())
+            .spawn(move || {
+                let files = expand_dropped(&dropped);
+                if !files.is_empty() {
+                    let _ = tx.send(AppMsg::Files(files));
+                    wake();
+                }
             });
+        if let Err(e) = spawned {
+            tracing::warn!("cannot start the drop thread: {e}");
         }
     }
 
@@ -1156,6 +1184,7 @@ impl OxTailApp {
         let profiles = Arc::clone(&self.profiles);
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.forced_profile.clone_from(&profile);
+            tab.customized = false;
             if let Some(v) = tab.view_mut() {
                 let p = profile.as_deref().and_then(|n| profiles.by_name(n));
                 v.hl.borrow_mut().set_profile(p);
@@ -1175,7 +1204,7 @@ impl OxTailApp {
     }
 
     /// Carries out what the rule editor asked for.
-    pub(crate) fn handle_editor_action(&mut self, action: EditorAction) {
+    pub fn handle_editor_action(&mut self, action: EditorAction) {
         match action {
             EditorAction::None => {}
             EditorAction::Apply(rules) => {
@@ -1183,6 +1212,9 @@ impl OxTailApp {
                     let name = v.hl.borrow().profile.clone();
                     v.hl.borrow_mut().set_rules(rules, name);
                     v.galleys.borrow_mut().clear();
+                }
+                if let Some(t) = self.tabs.get_mut(self.active) {
+                    t.customized = true;
                 }
             }
             EditorAction::Save { name, rules, base } => {
@@ -1203,6 +1235,7 @@ impl OxTailApp {
                 }
                 if let Some(t) = self.tabs.get_mut(self.active) {
                     t.forced_profile = Some(name);
+                    t.customized = false;
                 }
             }
         }
@@ -1320,5 +1353,72 @@ pub fn native_options(
         viewport,
         renderer,
         ..Default::default()
+    }
+}
+
+/// Most files opened from one dropped folder.
+pub const MAX_FILES_PER_FOLDER: usize = 50;
+
+/// Turns dropped paths into files to open: files stay, folders are replaced by
+/// the regular files directly inside them (sorted by name, at most
+/// [`MAX_FILES_PER_FOLDER`] per folder). Reads the file system: call it from a
+/// worker thread.
+pub fn expand_dropped(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for p in paths {
+        match std::fs::metadata(p) {
+            Ok(m) if m.is_dir() => {
+                let mut files: Vec<PathBuf> = std::fs::read_dir(p)
+                    .map(|rd| {
+                        rd.flatten()
+                            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                            .map(|e| e.path())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                files.sort();
+                files.truncate(MAX_FILES_PER_FOLDER);
+                out.extend(files);
+            }
+            _ => out.push(p.clone()),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folders_are_expanded_to_their_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("b.log"), "x").unwrap();
+        std::fs::write(dir.path().join("a.log"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let single = dir.path().join("b.log");
+        let got = expand_dropped(&[dir.path().to_path_buf(), single.clone()]);
+        assert_eq!(
+            got,
+            vec![dir.path().join("a.log"), dir.path().join("b.log"), single]
+        );
+        // Missing paths are passed through so the tab can report the error.
+        let missing = dir.path().join("nope.log");
+        assert_eq!(
+            expand_dropped(std::slice::from_ref(&missing)),
+            vec![missing]
+        );
+    }
+
+    #[test]
+    fn a_big_folder_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..(MAX_FILES_PER_FOLDER + 10) {
+            std::fs::write(dir.path().join(format!("f{i:03}.log")), "x").unwrap();
+        }
+        assert_eq!(
+            expand_dropped(&[dir.path().to_path_buf()]).len(),
+            MAX_FILES_PER_FOLDER
+        );
     }
 }

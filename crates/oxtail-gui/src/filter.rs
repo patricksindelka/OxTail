@@ -645,4 +645,46 @@ mod tests {
         assert_eq!(g.entries.len(), 2);
         assert!(is_include(FilterMode::Include));
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn entry() -> impl Strategy<Value = FilterEntry> {
+            (
+                "[ -~]{0,12}",
+                any::<bool>(),
+                0u8..3,
+                any::<bool>(),
+                any::<bool>(),
+            )
+                .prop_map(|(text, regex, case, whole_word, include)| FilterEntry {
+                    text,
+                    regex,
+                    case: match case {
+                        0 => CaseMode::Smart,
+                        1 => CaseMode::Sensitive,
+                        _ => CaseMode::Insensitive,
+                    },
+                    whole_word,
+                    include,
+                    enabled: true,
+                })
+        }
+
+        proptest! {
+            /// Every entry survives the query grammar.
+            #[test]
+            fn query_strings_round_trip(e in entry()) {
+                let s = e.to_query_string();
+                prop_assert_eq!(FilterEntry::from_query_string(&s), e);
+            }
+
+            /// Parsing arbitrary text never panics.
+            #[test]
+            fn parsing_never_panics(s in "\\PC{0,30}") {
+                let _ = FilterEntry::from_query_string(&s);
+            }
+        }
+    }
 }

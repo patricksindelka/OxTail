@@ -5,6 +5,7 @@
 mod args;
 mod ipc;
 mod logging;
+mod renderer;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -80,17 +81,7 @@ fn run(cli: args::Cli) -> anyhow::Result<ExitCode> {
         request,
         external,
     };
-    run_gui(&init, renderer)?;
-    Ok(ExitCode::SUCCESS)
-}
-
-/// The renderers to try, in order.
-fn renderer_chain(choice: Renderer) -> &'static [eframe::Renderer] {
-    match choice {
-        Renderer::Auto => &[eframe::Renderer::Wgpu, eframe::Renderer::Glow],
-        Renderer::Wgpu => &[eframe::Renderer::Wgpu],
-        Renderer::Glow => &[eframe::Renderer::Glow],
-    }
+    run_gui(init, renderer)
 }
 
 fn renderer_name(r: eframe::Renderer) -> &'static str {
@@ -100,37 +91,51 @@ fn renderer_name(r: eframe::Renderer) -> &'static str {
     }
 }
 
-fn run_gui(init: &AppInit, choice: Renderer) -> anyhow::Result<()> {
-    let mut last_error = None;
-    for &renderer in renderer_chain(choice) {
-        tracing::info!("trying the {} renderer", renderer_name(renderer));
-        let created = Arc::new(AtomicBool::new(false));
-        let flag = created.clone();
-        let init = init.clone();
-        let options = oxtail_gui::native_options(renderer, init.startup.session.window);
-        let result = eframe::run_native(
-            "OxTail",
-            options,
-            Box::new(move |cc| {
-                flag.store(true, Ordering::Release);
-                tracing::info!("using the {} renderer", renderer_name(renderer));
-                Ok(Box::new(OxTailApp::new(cc, init)))
-            }),
-        );
-        match result {
-            Ok(()) => return Ok(()),
-            Err(e) if created.load(Ordering::Acquire) => {
-                // The window worked; do not open a second one.
-                return Err(anyhow::anyhow!("the GUI stopped with an error: {e}"));
-            }
-            Err(e) => {
-                tracing::warn!("the {} renderer failed: {e}", renderer_name(renderer));
-                last_error = Some(e.to_string());
-            }
+/// Runs the GUI. `winit` allows one event loop per process, so the fallback
+/// from wgpu to OpenGL is a probe before the window exists plus a restart of
+/// the process if wgpu still fails (see `renderer`).
+fn run_gui(init: AppInit, choice: Renderer) -> anyhow::Result<ExitCode> {
+    let is_retry = std::env::var_os(renderer::RETRY_ENV).is_some();
+    let plan = renderer::plan(choice, renderer::wgpu_adapter_available, is_retry);
+    tracing::info!(
+        "starting with the {} renderer{}",
+        renderer_name(plan.first),
+        if is_retry {
+            " (retry after a wgpu failure)"
+        } else {
+            ""
         }
+    );
+    let created = Arc::new(AtomicBool::new(false));
+    let flag = created.clone();
+    let used = plan.first;
+    let options = oxtail_gui::native_options(plan.first, init.startup.session.window);
+    let result = eframe::run_native(
+        "OxTail",
+        options,
+        Box::new(move |cc| {
+            flag.store(true, Ordering::Release);
+            tracing::info!("using the {} renderer", renderer_name(used));
+            Ok(Box::new(OxTailApp::new(cc, init)))
+        }),
+    );
+    match result {
+        Ok(()) => Ok(ExitCode::SUCCESS),
+        Err(e) if created.load(Ordering::Acquire) => {
+            // The window worked; do not open a second one.
+            Err(anyhow::anyhow!("the GUI stopped with an error: {e}"))
+        }
+        Err(e) if plan.fall_back => {
+            tracing::warn!(
+                "the {} renderer failed ({e}); restarting with OpenGL",
+                renderer_name(plan.first)
+            );
+            renderer::retry_with_glow().map_err(|io| {
+                anyhow::anyhow!(
+                    "could not create a window ({e}) and could not restart with OpenGL: {io}"
+                )
+            })
+        }
+        Err(e) => Err(anyhow::anyhow!("could not create a window: {e}")),
     }
-    Err(anyhow::anyhow!(
-        "could not create a window: {}",
-        last_error.unwrap_or_else(|| "no renderer available".into())
-    ))
 }
