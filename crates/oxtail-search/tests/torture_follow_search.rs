@@ -179,12 +179,12 @@ fn filter_over_growing_source_equals_naive() {
 
 #[test]
 fn search_over_growing_source_equals_naive() {
+    let re = regex::bytes::Regex::new(r"timeout|user=\d+").unwrap();
     for (i, chunk_size) in [3u64, 100, 1000].into_iter().enumerate() {
         let seed = stable_seed(100 + i as u64);
         let src = Arc::new(MemSource::new(Vec::new()));
         let m = Matcher::compile(&Query::regex(r"timeout|user=\d+").with_case(CaseMode::Sensitive))
             .unwrap();
-        let re = regex::bytes::Regex::new(r"timeout|user=\d+").unwrap();
         let h = Arc::new(SearchJob::start(
             src.clone(),
             0,

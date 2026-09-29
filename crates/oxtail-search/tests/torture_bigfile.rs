@@ -150,7 +150,7 @@ fn big_file_open_index_and_search() {
         let s = doc.snapshot();
         if s.indexed_bytes == s.utf8_len && s.lines.exact && s.utf8_len == size {
             eprintln!(
-                "full index: {:.2?} (from open) = {:.0} MB/s; {} lines, {} checkpoints' worth of memory",
+                "full index: {:.2?} (from open) = {:.0} MB/s; {} lines, ~{} index checkpoints",
                 t.elapsed(),
                 size as f64 / 1e6 / t.elapsed().as_secs_f64(),
                 s.lines.known,
