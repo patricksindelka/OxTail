@@ -796,7 +796,10 @@ fn m_epoch(b: &[u8], i: usize, digits: usize) -> Option<(usize, Parsed)> {
         if end - i >= 19 {
             return None;
         }
-        n = n * 10 + i64::from(at(b, end) - b'0');
+        // Checked: 19 nines exceed i64::MAX (found by the time_detect fuzzer).
+        n = n
+            .checked_mul(10)?
+            .checked_add(i64::from(at(b, end) - b'0'))?;
         end += 1;
     }
     if end - i != digits {

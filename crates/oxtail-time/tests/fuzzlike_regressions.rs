@@ -8,7 +8,6 @@ use oxtail_time::{TimeContext, TimeParser, detect};
 /// Input: `9999999999999999999`. Expected: `None` (not a timestamp), never a
 /// panic.
 #[test]
-#[ignore = "BUG: oxtail-time m_epoch overflows i64 on a 19-digit run such as 9999999999999999999"]
 fn nineteen_digit_epoch_does_not_overflow() {
     let line = "9999999999999999999";
     let _ = detect(line);
