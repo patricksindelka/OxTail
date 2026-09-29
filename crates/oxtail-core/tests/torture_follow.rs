@@ -144,7 +144,7 @@ impl Writer {
 
     fn truncate_in_place(&mut self) {
         self.note("truncate-in-place");
-        self.file.set_len(0).unwrap();
+        truncate_file(&self.path);
         self.content.clear();
     }
 
@@ -153,7 +153,7 @@ impl Writer {
         let copy = self.dir.join(format!("app.log.{}", self.rotations));
         self.note(format!("copy-truncate -> {}", copy.display()));
         fs::copy(&self.path, &copy).unwrap();
-        self.file.set_len(0).unwrap();
+        truncate_file(&self.path);
         self.content.clear();
     }
 
@@ -223,6 +223,19 @@ impl Writer {
         }
         true
     }
+}
+
+/// Truncates through a separate write handle, as logrotate's copytruncate
+/// does. (An `append(true)` handle has no FILE_WRITE_DATA right on Windows,
+/// so it cannot truncate; this also exercises truncation by another handle
+/// while the Document holds the file open.)
+fn truncate_file(path: &Path) {
+    FsOpen::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
 }
 
 fn open_append(path: &Path) -> File {

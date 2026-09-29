@@ -310,15 +310,15 @@ mod tests {
         }
     }
 
-    // On macOS, FSEvents (as used by notify) delivered no event for appends to
-    // an open file in CI on macos-latest, neither non-recursively on the
-    // canonical directory nor recursively. Following still works there via
-    // the adaptive poll (see tests/follow.rs, which pass on macOS); instant
-    // wake-ups on append remain a known macOS gap to investigate on real
-    // hardware.
+    // Appends to an already-open file produce no watcher event on macOS
+    // (FSEvents, seen in CI on macos-latest) nor on Windows (NTFS updates the
+    // directory entry's size/time lazily while a handle is open, so
+    // ReadDirectoryChangesW stays quiet). Following still works there via the
+    // adaptive poll (tests/follow.rs passes on both); instant wake-ups on
+    // append are a known gap, see docs/dev.md.
     #[cfg_attr(
-        target_os = "macos",
-        ignore = "FSEvents gives no append events; polling covers it"
+        any(target_os = "macos", windows),
+        ignore = "no append events for open files on this OS; polling covers it"
     )]
     #[cfg(unix)]
     #[test]
@@ -346,15 +346,15 @@ mod tests {
         );
     }
 
-    // On macOS, FSEvents (as used by notify) delivered no event for appends to
-    // an open file in CI on macos-latest, neither non-recursively on the
-    // canonical directory nor recursively. Following still works there via
-    // the adaptive poll (see tests/follow.rs, which pass on macOS); instant
-    // wake-ups on append remain a known macOS gap to investigate on real
-    // hardware.
+    // Appends to an already-open file produce no watcher event on macOS
+    // (FSEvents, seen in CI on macos-latest) nor on Windows (NTFS updates the
+    // directory entry's size/time lazily while a handle is open, so
+    // ReadDirectoryChangesW stays quiet). Following still works there via the
+    // adaptive poll (tests/follow.rs passes on both); instant wake-ups on
+    // append are a known gap, see docs/dev.md.
     #[cfg_attr(
-        target_os = "macos",
-        ignore = "FSEvents gives no append events; polling covers it"
+        any(target_os = "macos", windows),
+        ignore = "no append events for open files on this OS; polling covers it"
     )]
     #[test]
     fn watcher_pokes_on_append() {

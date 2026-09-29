@@ -66,10 +66,14 @@ dlopen'ed, never `DT_NEEDED`.
 
 ## Known platform gaps
 
-- **macOS: no instant wake-up on appends.** notify's FSEvents backend delivered
-  no events for appends to an already-open log file on `macos-latest` CI
-  runners (tried: canonical directory, non-recursive and recursive watches).
-  Following still works through the adaptive poll (250 ms, backing off to
-  1 s), and the real-file follow tests pass on macOS. The two unit tests that
-  assert an append event are ignored on macOS. Next step: investigate on real
-  hardware, e.g. notify's kqueue backend for the followed file itself.
+- **macOS and Windows: no instant wake-up on appends.** Appends to an
+  already-open log file produce no watcher event: notify's FSEvents backend
+  stays silent on `macos-latest` (tried: canonical directory, non-recursive and
+  recursive watches), and on Windows NTFS updates the directory entry's size
+  and time lazily while the writer holds the file open, so
+  ReadDirectoryChangesW does not fire either. Following still works through
+  the adaptive poll (250 ms, backing off to 1 s), and the real-file follow
+  tests pass on both. The two unit tests that assert an append event are
+  ignored there. Possible next steps: notify's kqueue backend on macOS for
+  the followed file itself; a tighter poll interval while the file is known
+  to be active.
