@@ -22,6 +22,7 @@ use crate::alerts::{AlertEvent, AlertJob, AlertWorker, DesktopNotifier};
 use crate::colors::{Colors, select_theme};
 use crate::docview::{BookmarkInfo, DocView, ViewInit};
 use crate::find::{Dir, push_history};
+use crate::gototime::{GotoJob, GotoMsg, GotoTimeDialog, parse_goto_time};
 use crate::guistate::GuiState;
 use crate::keymap::{self, Action};
 use crate::persist::{Job, Persist, PersistResult};
@@ -84,6 +85,8 @@ pub struct GotoDialog {
 pub struct Windows {
     /// Go to line.
     pub goto: Option<GotoDialog>,
+    /// Go to time.
+    pub goto_time: Option<GotoTimeDialog>,
     /// Settings.
     pub settings: bool,
     /// Keyboard shortcuts.
@@ -636,6 +639,7 @@ impl OxTailApp {
         let now = Instant::now();
         self.drain_messages(ctx);
         self.drain_persist(ctx);
+        self.poll_goto_time(ctx);
         self.drain_external(ctx);
         self.handle_dropped_files(ctx);
         self.drain_config_changes();
@@ -1084,6 +1088,14 @@ impl OxTailApp {
                     });
                 }
             }
+            Action::GotoTime => {
+                if self.active_view().is_some() {
+                    self.windows.goto_time = Some(GotoTimeDialog {
+                        focus: true,
+                        ..GotoTimeDialog::default()
+                    });
+                }
+            }
             Action::Escape => self.escape(),
             Action::ToggleWrap => {
                 let wrap = !self.active_view().is_some_and(|v| v.wrap);
@@ -1095,6 +1107,10 @@ impl OxTailApp {
 
     fn escape(&mut self) {
         if self.windows.goto.take().is_some() {
+            return;
+        }
+        // Dropping the dialog cancels a running search.
+        if self.windows.goto_time.take().is_some() {
             return;
         }
         if self.rule_editor.open {
@@ -1110,6 +1126,25 @@ impl OxTailApp {
             } else if v.selection.is_some() {
                 v.clear_selection();
             }
+        }
+    }
+
+    /// Sets the time zone used to read and show timestamps and schedules
+    /// saving the settings.
+    pub fn set_timezone(&mut self, tz: oxtail_config::TimezoneSetting) {
+        if self.settings.timezone != tz {
+            self.settings.timezone = tz;
+            self.mark_settings_dirty();
+        }
+    }
+
+    /// Sets the time gap separator threshold in seconds (`0` switches it off)
+    /// and schedules saving the settings.
+    pub fn set_gap_threshold(&mut self, secs: f64) {
+        let secs = if secs.is_finite() { secs.max(0.0) } else { 0.0 };
+        if (self.settings.time_gap_threshold_secs - secs).abs() > f64::EPSILON {
+            self.settings.time_gap_threshold_secs = secs;
+            self.mark_settings_dirty();
         }
     }
 
@@ -1188,6 +1223,106 @@ impl OxTailApp {
             Action::ScrollLeft => view.h_scroll = (view.h_scroll - 40.0).max(0.0),
             Action::ScrollRight => view.h_scroll += 40.0,
             _ => {}
+        }
+        ctx.request_repaint();
+    }
+
+    /// Whether the go-to-time dialog is open.
+    pub fn windows_open_goto_time(&self) -> bool {
+        self.windows.goto_time.is_some()
+    }
+
+    /// The go-to-time dialog's error message, if it shows one.
+    pub fn goto_time_error(&self) -> Option<&str> {
+        self.windows
+            .goto_time
+            .as_ref()
+            .and_then(|d| d.error.as_deref())
+    }
+
+    /// Starts "go to time" for the active tab with what the user typed. The
+    /// search runs on a worker; the result is applied by
+    /// [`OxTailApp::poll_goto_time`]. Returns an error message for input that
+    /// cannot be understood.
+    pub fn apply_goto_time(&mut self, input: &str) -> Result<(), String> {
+        let tz = crate::colspec::zone_of(&self.settings.timezone);
+        let target = parse_goto_time(input, &tz, oxtail_time::jiff::Timestamp::now())?;
+        let wake = self.waker();
+        let Some(tab) = self.tabs.get(self.active) else {
+            return Ok(());
+        };
+        let tab_id = tab.id;
+        let Some(view) = tab.view() else {
+            return Ok(());
+        };
+        let job = GotoJob::start(
+            Arc::clone(&view.doc),
+            Arc::clone(&view.st.time),
+            target,
+            wake,
+        );
+        if let Some(d) = self.windows.goto_time.as_mut() {
+            d.job = Some((tab_id, job));
+            d.error = None;
+        }
+        Ok(())
+    }
+
+    /// Applies the answer of a running go-to-time search. Never blocks.
+    pub(crate) fn poll_goto_time(&mut self, ctx: &Context) {
+        let Some(dlg) = self.windows.goto_time.as_mut() else {
+            return;
+        };
+        let Some((tab_id, job)) = dlg.job.as_ref() else {
+            return;
+        };
+        let tab_id = *tab_id;
+        let Some(msg) = job.try_recv() else {
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        };
+        dlg.job = None;
+        let mut close = false;
+        match msg {
+            GotoMsg::Found { line, ts } => {
+                let tz = crate::colspec::zone_of(&self.settings.timezone);
+                if let Some(view) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.id == tab_id)
+                    .and_then(Tab::view_mut)
+                {
+                    view.jump_to_line(line, true);
+                    let at = ts.map(|t| crate::structure::format_timestamp(t, &tz));
+                    view.toast(match at {
+                        Some(a) => format!("Line {} at {a}", line + 1),
+                        None => format!("Line {}", line + 1),
+                    });
+                }
+                close = true;
+            }
+            GotoMsg::PastEnd { last_line } => {
+                if let Some(view) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.id == tab_id)
+                    .and_then(Tab::view_mut)
+                {
+                    view.jump_to_line(last_line, true);
+                    view.toast("That time is after the last line; showing the end");
+                }
+                close = true;
+            }
+            GotoMsg::NoTimestamps => {
+                dlg.error = Some("No timestamps found in this file".into());
+            }
+            GotoMsg::Changed => {
+                dlg.error = Some("The file changed during the search; try again".into());
+            }
+            GotoMsg::Cancelled => {}
+        }
+        if close {
+            self.windows.goto_time = None;
         }
         ctx.request_repaint();
     }

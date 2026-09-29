@@ -50,6 +50,7 @@ pub mod export;
 pub mod filter;
 pub mod find;
 pub mod goto;
+pub mod gototime;
 pub mod guistate;
 pub mod highlight;
 pub mod icon;
@@ -72,6 +73,7 @@ pub mod tab;
 pub mod table;
 pub mod tablepaint;
 pub mod text;
+pub mod timeview;
 pub mod util;
 pub mod viewport;
 

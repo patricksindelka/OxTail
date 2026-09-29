@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use egui::{Align2, Context, CornerRadius, Id, RichText, Sense, Ui, ViewportCommand, vec2};
-use oxtail_config::ThemeChoice;
+use oxtail_config::{ThemeChoice, TimezoneSetting};
 
 use crate::app::{OxTailApp, Windows};
 use crate::colui::{self, SuggestionAction};
@@ -13,6 +13,7 @@ use crate::logview::{self, ViewEnv};
 use crate::panels::{self, StatusAction};
 use crate::request::OpenRequest;
 use crate::tab::{Tab, TabContent, drop_index, move_item};
+use crate::timeview::{DEFAULT_GAP_SECS, RelMode};
 
 impl OxTailApp {
     /// Draws one frame into `ui`.
@@ -140,6 +141,13 @@ impl OxTailApp {
                         self.perform(Action::GotoLine, ctx);
                         ui.close();
                     }
+                    if ui
+                        .add(egui::Button::new("Go to time\u{2026}").shortcut_text("Ctrl+Shift+G"))
+                        .clicked()
+                    {
+                        self.perform(Action::GotoTime, ctx);
+                        ui.close();
+                    }
                     ui.separator();
                     ui.menu_button("Bookmarks", |ui| {
                         if ui
@@ -223,6 +231,7 @@ impl OxTailApp {
                     self.mark_settings_dirty();
                 }
                 self.columns_menu(ui);
+                self.time_menu(ui);
                 ui.separator();
                 if ui
                     .add(egui::Button::new("Zoom in").shortcut_text("Ctrl+="))
@@ -293,6 +302,16 @@ impl OxTailApp {
                 view.detail_open = detail;
             }
             ui.separator();
+            ui.menu_button("Relative time", |ui| {
+                for mode in [RelMode::Off, RelMode::Previous, RelMode::Selected] {
+                    if ui
+                        .radio_value(&mut view.rel_mode, mode, mode.label())
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                }
+            });
             if ui
                 .add_enabled(has_parser, egui::Button::new("Statistics\u{2026}"))
                 .clicked()
@@ -312,6 +331,19 @@ impl OxTailApp {
                 ui.label(egui::RichText::new(format!("Format: {}", view.st.name)).weak());
             }
         });
+    }
+
+    /// The "Time" additions of the View menu: gap separators.
+    fn time_menu(&mut self, ui: &mut Ui) {
+        let mut on = self.settings.time_gap_threshold_secs > 0.0;
+        if ui
+            .checkbox(&mut on, "Show time gaps")
+            .on_hover_text("A separator between lines that are far apart in time")
+            .changed()
+        {
+            self.settings.time_gap_threshold_secs = if on { DEFAULT_GAP_SECS } else { 0.0 };
+            self.mark_settings_dirty();
+        }
     }
 
     // -------------------------------------------------------------- tab bar
@@ -617,6 +649,7 @@ impl OxTailApp {
                 line_numbers: settings.line_numbers,
                 minimap: true,
                 style_epoch: *style_epoch,
+                gap_secs: settings.time_gap_threshold_secs,
             };
             egui::CentralPanel::no_frame().show(ui, |ui| {
                 logview::show(ui, Id::new(("log", tab_id)), view, &env);
@@ -647,6 +680,7 @@ impl OxTailApp {
 
     fn windows_ui(&mut self, ctx: &Context) {
         self.goto_window(ctx);
+        self.goto_time_window(ctx);
         self.bookmark_window(ctx);
         self.settings_window(ctx);
         self.shortcuts_window(ctx);
@@ -665,6 +699,76 @@ impl OxTailApp {
             let colors = self.colors.clone();
             let action = self.rule_editor.show(ctx, &colors, &preview);
             self.handle_editor_action(action);
+        }
+    }
+
+    fn goto_time_window(&mut self, ctx: &Context) {
+        let Some(mut dlg) = self.windows.goto_time.take() else {
+            return;
+        };
+        let mut close = false;
+        let mut apply = false;
+        let mut cancel_search = false;
+        egui::Window::new("Go to time")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_TOP, [0.0, 90.0])
+            .show(ctx, |ui| {
+                ui.label("2026-09-29 10:00, 10:15, -15m (from the end) or +1h (from the start)");
+                let searching = dlg.job.is_some();
+                let resp = ui.add_enabled(
+                    !searching,
+                    egui::TextEdit::singleline(&mut dlg.text)
+                        .hint_text("e.g. 2026-09-29 10:00")
+                        .desired_width(300.0),
+                );
+                if dlg.focus {
+                    resp.request_focus();
+                    dlg.focus = false;
+                }
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    apply = true;
+                }
+                if let Some(e) = &dlg.error {
+                    ui.label(RichText::new(e).color(egui::Color32::LIGHT_RED));
+                }
+                ui.horizontal(|ui| {
+                    if searching {
+                        ui.spinner();
+                        ui.label("Searching\u{2026}");
+                        if ui.button("Cancel").clicked() {
+                            cancel_search = true;
+                        }
+                    } else {
+                        if ui.button("Go").clicked() {
+                            apply = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    }
+                });
+            });
+        if cancel_search {
+            // Dropping the job cancels the worker.
+            dlg.job = None;
+        }
+        self.windows.goto_time = Some(dlg);
+        if apply {
+            let text = self
+                .windows
+                .goto_time
+                .as_ref()
+                .map(|d| d.text.clone())
+                .unwrap_or_default();
+            if let Err(e) = self.apply_goto_time(&text)
+                && let Some(d) = self.windows.goto_time.as_mut()
+            {
+                d.error = Some(e);
+            }
+        }
+        if close {
+            self.windows.goto_time = None;
         }
     }
 
@@ -775,6 +879,8 @@ impl OxTailApp {
         let mut wrap = self.settings.wrap;
         let mut numbers = self.settings.line_numbers;
         let mut notifications = self.settings.notifications_enabled;
+        let mut zone = self.settings.timezone.clone();
+        let mut gap_secs = self.settings.time_gap_threshold_secs;
         let theme_names: Vec<String> = self
             .themes
             .themes()
@@ -853,6 +959,46 @@ impl OxTailApp {
                         ui.label("Desktop notifications for alert rules");
                         ui.checkbox(&mut notifications, "");
                         ui.end_row();
+                        ui.label("Time zone");
+                        ui.horizontal(|ui| {
+                            let label = match &zone {
+                                TimezoneSetting::Local => "Local".to_string(),
+                                TimezoneSetting::Utc => "UTC".to_string(),
+                                TimezoneSetting::Named(_) => "Named".to_string(),
+                            };
+                            egui::ComboBox::from_id_salt("time-zone")
+                                .selected_text(label)
+                                .width(80.0)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut zone, TimezoneSetting::Local, "Local");
+                                    ui.selectable_value(&mut zone, TimezoneSetting::Utc, "UTC");
+                                    if ui
+                                        .selectable_label(
+                                            matches!(zone, TimezoneSetting::Named(_)),
+                                            "Named",
+                                        )
+                                        .clicked()
+                                        && !matches!(zone, TimezoneSetting::Named(_))
+                                    {
+                                        zone = TimezoneSetting::Named("Europe/Amsterdam".into());
+                                    }
+                                });
+                            if let TimezoneSetting::Named(n) = &mut zone {
+                                ui.add(
+                                    egui::TextEdit::singleline(n)
+                                        .desired_width(150.0)
+                                        .hint_text("IANA name, e.g. Europe/Amsterdam"),
+                                );
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Time gap separator (seconds, 0 = off)");
+                        ui.add(
+                            egui::DragValue::new(&mut gap_secs)
+                                .range(0.0..=86_400.0)
+                                .speed(0.5),
+                        );
+                        ui.end_row();
                     });
                 ui.separator();
                 ui.label(
@@ -876,6 +1022,14 @@ impl OxTailApp {
         }
         if numbers != self.settings.line_numbers {
             self.settings.line_numbers = numbers;
+            dirty = true;
+        }
+        if zone != self.settings.timezone {
+            self.settings.timezone = zone;
+            dirty = true;
+        }
+        if (gap_secs - self.settings.time_gap_threshold_secs).abs() > f64::EPSILON {
+            self.settings.time_gap_threshold_secs = gap_secs.max(0.0);
             dirty = true;
         }
         if notifications != self.settings.notifications_enabled {
@@ -950,6 +1104,10 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Shift+F", "Filter view"),
     ("Ctrl+G", "Go to line (123, +100, -50, 50%)"),
     (
+        "Ctrl+Shift+G",
+        "Go to time (2026-09-29 10:00, 10:15, -15m from the end, +1h from the start)",
+    ),
+    (
         "Ctrl+F2 / F2 / Shift+F2",
         "Toggle / next / previous bookmark",
     ),
@@ -997,5 +1155,5 @@ fn drop_overlay(ctx: &Context) {
 
 /// Windows that exist, for tests.
 pub fn any_window_open(w: &Windows) -> bool {
-    w.goto.is_some() || w.settings || w.shortcuts || w.about
+    w.goto.is_some() || w.goto_time.is_some() || w.settings || w.shortcuts || w.about
 }

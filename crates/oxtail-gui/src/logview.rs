@@ -18,6 +18,7 @@ use egui::{
 use oxtail_core::Line;
 use oxtail_highlight::{ColorRef, Style, StyledSpan};
 use oxtail_search::{MatchSet, Matcher};
+use oxtail_time::jiff::Timestamp;
 
 use crate::colors::{Colors, mix32};
 use crate::docview::DocView;
@@ -27,6 +28,7 @@ use crate::scroll::{Row, Visible};
 use crate::table::{CellKey, HEADER_EXTRA, HeaderGeometry, draw_header};
 use crate::tablepaint::{TableRow, paint_table_row};
 use crate::text::{JobOptions, build_job, clean_ranges, compose};
+use crate::timeview::{REL_CHARS, RelMode, format_gap, gap_between, relative_label};
 use crate::viewport::{TrackClick, classify_click, digits, position_at, thumb_px};
 
 /// Width of the vertical scrollbar.
@@ -54,6 +56,9 @@ pub struct ViewEnv<'a> {
     pub minimap: bool,
     /// Changes whenever theme or font changed (invalidates laid-out lines).
     pub style_epoch: u64,
+    /// Show a separator between rows further apart than this many seconds
+    /// (`0` disables).
+    pub gap_secs: f64,
 }
 
 // ------------------------------------------------------------------ galleys
@@ -312,7 +317,13 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         max_number = max_number.max(l.number + 1);
     }
     let number_cols = digits(max_number) + usize::from(!snapshot.lines.exact);
+    let rel_w = if view.rel_mode == RelMode::Off {
+        0.0
+    } else {
+        (REL_CHARS as f32 + 1.0) * char_w
+    };
     let gutter_w = MARKER_W
+        + rel_w
         + if env.line_numbers {
             number_cols as f32 * char_w + PAD * 2.0
         } else {
@@ -444,6 +455,17 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     let gutter_painter = painter.with_clip_rect(gutter_rect);
     painter.rect_filled(gutter_rect, CornerRadius::ZERO, colors.gutter_bg);
     let mut prev_offset: Option<u64> = None;
+    let time_on = view.rel_mode != RelMode::Off || env.gap_secs > 0.0;
+    let mut prev_ts: Option<Timestamp> = if time_on {
+        vis.rows.first().and_then(|r| view.time_before(&r.line))
+    } else {
+        None
+    };
+    let selected_ts = if view.rel_mode == RelMode::Selected {
+        view.selected_time()
+    } else {
+        None
+    };
     let selection = view.selection;
     let cursor = view.cursor;
     let mut bookmark_updates: Vec<(u64, u64)> = Vec::new();
@@ -473,6 +495,16 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
             );
         }
         prev_offset = Some(row.line.offset);
+        let ts = if time_on {
+            view.row_time(&row.line)
+        } else {
+            None
+        };
+        let gap = gap_between(prev_ts, ts, env.gap_secs);
+        let rel = relative_label(view.rel_mode, ts, prev_ts, selected_ts);
+        if ts.is_some() {
+            prev_ts = ts;
+        }
 
         let selected = selection.is_some_and(|s| s.contains(row.line.offset));
         if selected {
@@ -553,12 +585,37 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                 format!("\u{2248}{}", row.line.number + 1)
             };
             gutter_painter.text(
-                pos2(gutter_rect.right() - PAD, y),
+                pos2(gutter_rect.right() - PAD - rel_w, y),
                 Align2::RIGHT_TOP,
                 label,
                 font.clone(),
                 colors.gutter_text,
             );
+        }
+        if let Some(rel) = rel {
+            gutter_painter.text(
+                pos2(gutter_rect.right() - PAD, y),
+                Align2::RIGHT_TOP,
+                rel,
+                font.clone(),
+                mix32(colors.gutter_text, colors.accent, 0.35),
+            );
+        }
+        if let Some(g) = gap {
+            // Like the mark separator, with the size of the gap.
+            let warn = colors.resolve(&ColorRef::solid(oxtail_highlight::SemanticColor::Warn));
+            let ly = y.round();
+            painter.hline(full.left()..=text_rect.right(), ly, Stroke::new(1.5, warn));
+            let label = format!("gap {}", format_gap(g));
+            let galley = ctx.fonts_mut(|f| {
+                f.layout_no_wrap(label, FontId::proportional(env.font_size * 0.85), warn)
+            });
+            let pill = Rect::from_min_size(
+                pos2(text_rect.right() - galley.size().x - PAD * 2.0 - 2.0, ly),
+                galley.size() + vec2(PAD * 2.0, 2.0),
+            );
+            painter.rect_filled(pill, CornerRadius::same(3), colors.background);
+            painter.galley(pos2(pill.left() + PAD, pill.top() + 1.0), galley, warn);
         }
     }
     if let Some(prev) = prev_offset

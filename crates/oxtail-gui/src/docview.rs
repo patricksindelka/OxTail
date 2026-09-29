@@ -19,6 +19,7 @@ use oxtail_core::{
     DocEvent, DocSnapshot, DocState, Document, EncodingChoice, Line, LineRequest, RequestId,
 };
 use oxtail_search::MatchSet;
+use oxtail_time::jiff::Timestamp;
 
 use crate::filter::FilterState;
 use crate::find::{Dir, FindEvent, FindState};
@@ -29,6 +30,7 @@ use crate::scroll::{
 };
 use crate::structure::{Structure, StructureInput, StructureResult};
 use crate::table::TableCache;
+use crate::timeview::{RelMode, TimeCache};
 use crate::viewport::{ScrollSpace, bytes_target, lines_target};
 
 /// How long a read may stay outstanding before it is asked for again.
@@ -286,6 +288,10 @@ pub struct DocView {
     pub sample: Vec<String>,
     /// Wakes the event loop from worker threads.
     pub wake: Arc<dyn Fn() + Send + Sync>,
+    /// What the relative-time gutter column shows.
+    pub rel_mode: RelMode,
+    /// Parsed timestamps of lines (by start offset).
+    time_cache: RefCell<TimeCache>,
     pending: HashMap<RequestId, Pending>,
     back_attempts: HashMap<u64, u32>,
     pending_px: f32,
@@ -349,6 +355,8 @@ impl DocView {
             chooser: crate::chooser::ChooserState::default(),
             sample: Vec::new(),
             wake: Arc::new(|| {}),
+            rel_mode: RelMode::Off,
+            time_cache: RefCell::new(TimeCache::default()),
             pending: HashMap::new(),
             back_attempts: HashMap::new(),
             pending_px: 0.0,
@@ -391,6 +399,7 @@ impl DocView {
         self.hl.borrow_mut().set_parser(parser);
         self.galleys.borrow_mut().clear();
         self.tcache.clear();
+        self.time_cache.borrow_mut().clear();
         self.max_text_w = 0.0;
         self.filter.set_columns(self.st.query_context());
     }
@@ -439,9 +448,49 @@ impl DocView {
             self.tz_setting = tz.clone();
             self.st.set_zone(tz);
             self.tcache.clear();
+            self.time_cache.borrow_mut().clear();
             self.galleys.borrow_mut().clear();
             self.filter.set_columns(self.st.query_context());
         }
+    }
+
+    /// The timestamp of a line: the timestamp column of its record, else the
+    /// first timestamp in its text (cached).
+    pub fn row_time(&self, line: &Line) -> Option<Timestamp> {
+        if let Some(v) = self.time_cache.borrow().get(line.offset) {
+            return v;
+        }
+        let p = self.hl.borrow_mut().prepare(line);
+        let ts = self.st.record_time(p.record.as_ref(), &p.text);
+        self.time_cache.borrow_mut().put(line.offset, ts);
+        ts
+    }
+
+    /// The timestamp of the nearest cached line before `line` that has one
+    /// (looking at most a few lines back), for the relative-time column and
+    /// gap detection of the first visible row.
+    pub fn time_before(&self, line: &Line) -> Option<Timestamp> {
+        let set = self.active_set();
+        let mut at = line.offset;
+        for _ in 0..8 {
+            let prev_off = match &set {
+                Some(s) => s.prev_before(at)?,
+                None => self.cache.prev(at)?.offset,
+            };
+            let prev = self.cache.get(prev_off)?;
+            if let Some(t) = self.row_time(prev) {
+                return Some(t);
+            }
+            at = prev_off;
+        }
+        None
+    }
+
+    /// The timestamp of the selected (cursor) line.
+    pub fn selected_time(&self) -> Option<Timestamp> {
+        let off = self.selection.map(|s| s.cursor.offset).or(self.cursor)?;
+        let line = self.cache.get(off)?;
+        self.row_time(line)
     }
 
     /// Starts the column statistics worker for the current scope.
@@ -681,6 +730,7 @@ impl DocView {
         self.hl.borrow_mut().clear_cache();
         self.galleys.borrow_mut().clear();
         self.tcache.clear();
+        self.time_cache.borrow_mut().clear();
         self.max_text_w = 0.0;
         self.alert_next = None;
         self.was_exact = false;
