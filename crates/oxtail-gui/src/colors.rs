@@ -178,6 +178,7 @@ pub fn select_theme(settings: &Settings, themes: &ThemeSet, system_dark: Option<
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)] // tests build states field by field for readability
 mod tests {
     use super::*;
     use oxtail_highlight::SemanticColor;

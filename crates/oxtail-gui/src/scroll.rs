@@ -632,7 +632,7 @@ mod tests {
         let p = tail_position(&full(100), &c, 55.0, &h).unwrap();
         // Rows of 10px: 5.5 rows visible, so the top row is 4.5 rows above
         // the last one, scrolled out by 5px.
-        assert_eq!(p.top, 94 * W - 0);
+        assert_eq!(p.top, 94 * W);
         assert_eq!(p.sub_px, 5.0);
         let v = layout_rows(&p, &full(100), &c, 55.0, &h);
         assert!(v.reaches_end);

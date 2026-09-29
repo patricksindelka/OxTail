@@ -57,7 +57,7 @@ pub fn load_startup(data_dir: DataDir) -> Startup {
     let session = data_dir
         .session_path()
         .map(|p| Session::load(&p, &mapper))
-        .unwrap_or_else(Session::new);
+        .unwrap_or_default();
     let profiles = match data_dir.profiles_dir() {
         Some(dir) => {
             let loaded = ProfileSet::load_dir(&dir);

@@ -335,10 +335,9 @@ fn rule_form(ui: &mut Ui, r: &mut Rule, colors: &Colors) {
                         ui.text_edit_singleline(pattern);
                         ui.checkbox(case_sensitive, "Case sensitive");
                         if !pattern.is_empty()
-                            && let Err(e) =
-                                oxtail_search::Matcher::compile(&oxtail_search::Query::regex(
-                                    pattern.as_str(),
-                                ))
+                            && let Err(e) = oxtail_search::Matcher::compile(
+                                &oxtail_search::Query::regex(pattern.as_str()),
+                            )
                         {
                             ui.label(RichText::new(e.to_string()).color(Color32::LIGHT_RED));
                         }
@@ -517,7 +516,11 @@ mod tests {
 
     #[test]
     fn preview_uses_the_edited_rules() {
-        let rules = vec![Rule::literal("w", "warn")];
+        let rules = vec![
+            Rule::literal("w", "warn").styled(oxtail_highlight::Style::fg(ColorRef::solid(
+                SemanticColor::Warn,
+            ))),
+        ];
         assert_eq!(preview_spans(&rules, "a warn b"), 1);
         assert_eq!(preview_spans(&[], "a warn b"), 0);
         assert_eq!(preview_spans(&[Rule::regex("bad", "(x")], "a warn b"), 0);

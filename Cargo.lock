@@ -2899,6 +2899,7 @@ dependencies = [
  "oxtail-highlight",
  "oxtail-search",
  "oxtail-time",
+ "pollster",
  "rfd",
  "serde",
  "serde_json",

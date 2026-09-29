@@ -53,6 +53,7 @@ rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal", 
 notify-rust = { version = "4.18.1", default-features = false, features = ["z"] }
 interprocess = "2.4.4"
 lexopt = "0.3.2"
+pollster = "0.4.0"
 
 # errors / logging
 thiserror = "2.0.21"

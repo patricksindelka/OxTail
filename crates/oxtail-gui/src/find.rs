@@ -481,6 +481,7 @@ pub fn history_step(
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)] // tests build states field by field for readability
 mod tests {
     use super::*;
     use oxtail_core::MemSource;

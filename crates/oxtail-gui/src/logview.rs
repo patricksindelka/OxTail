@@ -344,17 +344,13 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
             .input(|i| i.pointer.hover_pos())
             .is_some_and(|p| full.contains(p));
     if hovered {
-        let (delta, shift) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers.shift));
+        let delta = ui.input(|i| i.smooth_scroll_delta);
         if delta.y != 0.0 {
             view.scroll_px(-delta.y);
         }
-        let dx = if shift { delta.y } else { 0.0 } + delta.x;
-        if dx != 0.0 && !view.wrap {
-            view.h_scroll -= dx;
-            if shift && delta.y != 0.0 {
-                // The shifted wheel scrolls sideways only.
-                view.scroll_px(delta.y);
-            }
+        // egui already turns Shift+wheel into a horizontal delta.
+        if delta.x != 0.0 && !view.wrap {
+            view.h_scroll -= delta.x;
         }
     }
 
@@ -390,7 +386,11 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
             row_h
         }
     };
+    view.repaint_after = None;
     let vis: Visible = view.update_rows(metrics, &height_of);
+    if let Some(d) = view.repaint_after.take() {
+        ctx.request_repaint_after(d);
+    }
 
     // Horizontal scroll range.
     let mut widest = view.max_text_w;
@@ -473,11 +473,9 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         );
         // Gutter: bookmark, rule marker, number.
         let marker_c = pos2(gutter_row.left() + MARKER_W * 0.5, y + row_h * 0.5);
-        if row.line.number_exact {
-            if view.bookmarks.contains_key(&row.line.number) {
-                bookmark_icon(&gutter_painter, marker_c, row_h * 0.7, colors.accent);
-                bookmark_updates.push((row.line.number, row.line.offset));
-            }
+        if row.line.number_exact && view.bookmarks.contains_key(&row.line.number) {
+            bookmark_icon(&gutter_painter, marker_c, row_h * 0.7, colors.accent);
+            bookmark_updates.push((row.line.number, row.line.offset));
         }
         if let Some(g) = prepared.hl.gutter {
             gutter_painter.circle_filled(
@@ -625,14 +623,6 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         }
         resp.on_hover_text("Resume following (F)");
     }
-    if ctx_wants_repaint(view) {
-        ui.ctx().request_repaint();
-    }
-}
-
-fn ctx_wants_repaint(view: &DocView) -> bool {
-    // Reads are in flight or the view is still settling towards its target.
-    view.find.searching || view.filter.has_job() && !view.filter.status.done
 }
 
 fn empty_message(view: &DocView) -> Option<String> {
@@ -684,19 +674,15 @@ fn handle_pointer(
         && let Some(p) = pos
         && gutter_rect.contains(p)
         && let Some(line) = row_for(p)
+        && line.number_exact
     {
-        if line.number_exact {
-            if !view.bookmarks.contains_key(&line.number) {
-                view.bookmarks.insert(
-                    line.number,
-                    crate::docview::BookmarkInfo {
-                        label: String::new(),
-                        offset: Some(line.offset),
-                    },
-                );
-            }
-            view.editing_bookmark = Some(line.number);
-        }
+        view.bookmarks
+            .entry(line.number)
+            .or_insert_with(|| crate::docview::BookmarkInfo {
+                label: String::new(),
+                offset: Some(line.offset),
+            });
+        view.editing_bookmark = Some(line.number);
     }
     if resp.drag_started_by(egui::PointerButton::Primary)
         && let Some(o) = press_origin

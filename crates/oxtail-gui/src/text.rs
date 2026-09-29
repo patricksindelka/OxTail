@@ -261,6 +261,7 @@ pub fn build_job(
 }
 
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)] // a slice holding one match range is what the API takes
 mod tests {
     use super::*;
     use oxtail_highlight::{ColorRef, SemanticColor};

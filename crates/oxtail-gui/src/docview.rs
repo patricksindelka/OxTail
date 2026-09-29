@@ -276,7 +276,10 @@ pub struct DocView {
     copy: Option<CopyJob>,
     bookmark_cursor: Option<u64>,
     sniffed: Option<Vec<String>>,
-    last_len: u64,
+    max_end: u64,
+    last_tail: Option<Instant>,
+    /// The view wants another frame after this long (rate-limited reads).
+    pub repaint_after: Option<Duration>,
     was_exact: bool,
     /// Next line number the alert scan has not looked at (`None` until the
     /// initial index is complete).
@@ -327,7 +330,9 @@ impl DocView {
             copy: None,
             bookmark_cursor: None,
             sniffed: None,
-            last_len: 0,
+            max_end: 0,
+            last_tail: None,
+            repaint_after: None,
             was_exact: false,
             alert_next: None,
         }
@@ -451,7 +456,8 @@ impl DocView {
         self.max_text_w = 0.0;
         self.alert_next = None;
         self.was_exact = false;
-        self.last_len = 0;
+        self.max_end = 0;
+        self.last_tail = None;
         self.find.restart_now(Instant::now());
         self.find.cancel();
         self.find.restart_now(Instant::now());
@@ -502,16 +508,23 @@ impl DocView {
     }
 
     fn on_grew(&mut self, utf8_len: u64) {
-        // The previously last line may have been unterminated: read it again.
-        let old = self.last_len.min(utf8_len);
+        // The line that was last when it was cached may have been
+        // unterminated and grown: read it again (following reads the tail).
         if !self.follow
-            && let Some(l) = self.cache.last_line_ending_at(old).cloned()
-            && old > 0
+            && self.max_end > 0
+            && self.max_end <= utf8_len
             && !self.has_pending(|k| matches!(k, ReqKind::Refresh))
+            && let Some(l) = self.cache.containing(self.max_end - 1).cloned()
         {
             self.send(LineRequest::AtOffsets(vec![l.offset]), ReqKind::Refresh);
         }
-        self.last_len = utf8_len;
+    }
+
+    fn insert_lines(&mut self, generation: u64, lines: Vec<Line>) {
+        if let Some(end) = lines.iter().map(|l| l.offset + l.len).max() {
+            self.max_end = self.max_end.max(end);
+        }
+        self.cache.insert(generation, lines);
     }
 
     fn on_lines(&mut self, id: RequestId, generation: u64, lines: Vec<Line>) {
@@ -526,7 +539,7 @@ impl DocView {
         match kind {
             Some(ReqKind::Jump(j)) => {
                 let copy = lines.clone();
-                self.cache.insert(generation, lines);
+                self.insert_lines(generation, lines);
                 if copy.is_empty() {
                     self.toast("Nothing to show at that position");
                 } else {
@@ -535,7 +548,7 @@ impl DocView {
             }
             Some(ReqKind::Sniff) => {
                 self.sniffed = Some(lines.iter().map(|l| l.text.clone()).collect());
-                self.cache.insert(generation, lines);
+                self.insert_lines(generation, lines);
             }
             Some(ReqKind::Tail) => {
                 if self.start_lines.take().is_some()
@@ -546,10 +559,10 @@ impl DocView {
                     self.follow = false;
                     self.resume_on_bottom = true;
                 }
-                self.cache.insert(generation, lines);
+                self.insert_lines(generation, lines);
             }
             _ => {
-                self.cache.insert(generation, lines);
+                self.insert_lines(generation, lines);
             }
         }
     }
@@ -723,6 +736,17 @@ impl DocView {
                 if self.has_pending(|k| matches!(k, ReqKind::Tail)) || self.start_lines.is_some() {
                     return;
                 }
+                // A file that grows continuously would otherwise be re-read on
+                // every frame: at most one tail read per gap.
+                const TAIL_GAP: Duration = Duration::from_millis(30);
+                if let Some(t) = self.last_tail {
+                    let since = t.elapsed();
+                    if since < TAIL_GAP {
+                        self.repaint_after = Some(TAIL_GAP - since);
+                        return;
+                    }
+                }
+                self.last_tail = Some(Instant::now());
                 self.send(
                     LineRequest::Tail {
                         count: view_rows + OVERSCAN_ROWS,
@@ -904,6 +928,14 @@ impl DocView {
     /// when `center`).
     pub fn jump_offset(&mut self, offset: u64, center: bool) {
         self.bookmark_cursor = None;
+        // Already on screen (not at the very edge): keep the view still.
+        if let Some(i) = self.last_rows.iter().position(|l| l.offset == offset)
+            && i > 0
+            && i + 1 < self.last_rows.len()
+        {
+            self.cursor = Some(offset);
+            return;
+        }
         self.follow = false;
         self.pending_px = 0.0;
         self.resume_on_bottom = true;
@@ -1054,7 +1086,13 @@ impl DocView {
     /// answer is picked up with [`DocView::take_sniffed`].
     pub fn request_sniff(&mut self) {
         if !self.has_pending(|k| matches!(k, ReqKind::Sniff)) {
-            self.send(LineRequest::Range { first: 0, count: 50 }, ReqKind::Sniff);
+            self.send(
+                LineRequest::Range {
+                    first: 0,
+                    count: 50,
+                },
+                ReqKind::Sniff,
+            );
         }
     }
 

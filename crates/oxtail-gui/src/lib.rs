@@ -12,6 +12,7 @@
 
 pub mod alerts;
 pub mod app;
+pub mod appui;
 pub mod colors;
 pub mod docview;
 pub mod filter;
@@ -30,6 +31,7 @@ pub mod ruleeditor;
 pub mod rules;
 pub mod scroll;
 pub mod startup;
+pub mod tab;
 pub mod text;
 pub mod util;
 pub mod viewport;
