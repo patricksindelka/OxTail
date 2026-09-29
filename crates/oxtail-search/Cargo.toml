@@ -12,5 +12,19 @@ workspace = true
 
 [dependencies]
 oxtail-core = { workspace = true }
+aho-corasick = { workspace = true }
+memchr = { workspace = true }
+parking_lot = { workspace = true }
+rayon = { workspace = true }
+regex = { workspace = true }
+regex-syntax = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "search"
+harness = false

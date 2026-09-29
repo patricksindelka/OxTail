@@ -24,6 +24,7 @@ oxtail-gui = { path = "crates/oxtail-gui" }
 memchr = "2.8.3"
 regex = "1.13.1"
 regex-automata = "0.4.18"
+regex-syntax = "0.8.11"
 aho-corasick = "1.1.5"
 encoding_rs = "0.8.42"
 chardetng = "1.0.0"
