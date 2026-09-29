@@ -507,10 +507,8 @@ mod tests {
     fn whole_word_regex_with_punctuation_edges() {
         let ww = |p: &str, l: &str| {
             let m = Matcher::compile(&Query::regex(p).with_whole_word(true)).unwrap();
-            let lit = Matcher::compile(
-                &Query::literal(p.replace('\\', "")).with_whole_word(true),
-            )
-            .unwrap();
+            let lit = Matcher::compile(&Query::literal(p.replace('\\', "")).with_whole_word(true))
+                .unwrap();
             let r = m.is_match(l.as_bytes());
             assert_eq!(r, lit.is_match(l.as_bytes()), "{p:?} in {l:?} vs literal");
             r
