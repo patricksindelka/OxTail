@@ -41,8 +41,10 @@ pub const HISTORY_FILE: &str = "search-history.json";
 /// [`Startup::warnings`].
 pub fn load_startup(data_dir: DataDir) -> Startup {
     let mut warnings = Vec::new();
+    // Only portable mode stores executable-relative paths; installed copies
+    // may share one session file from different install locations.
     let mapper = if data_dir.is_persistent() {
-        PathMapper::current()
+        PathMapper::for_mode(&data_dir.mode, &std::env::current_exe().unwrap_or_default())
     } else {
         PathMapper::absolute_only()
     };

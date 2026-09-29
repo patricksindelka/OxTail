@@ -149,7 +149,7 @@ impl Default for Settings {
             line_numbers: true,
             max_display_line_length: 10_000,
             follow_poll_interval_ms: 250,
-            cache_size_mb: 256,
+            cache_size_mb: 64,
             keymap: Keymap::Standard,
             custom_keybindings: BTreeMap::new(),
             default_encoding: "auto".to_string(),

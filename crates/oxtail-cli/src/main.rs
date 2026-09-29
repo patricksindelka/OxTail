@@ -2,6 +2,11 @@
 //! makes sure only one instance runs per data folder, and starts the GUI with
 //! a renderer fallback chain (wgpu, then OpenGL).
 
+// Release builds on Windows are GUI-subsystem apps, so launching OxTail does
+// not also open a console window. (Console output such as `--help` is then not
+// shown when started from a terminal; attaching to the parent console is M6.)
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod args;
 mod ipc;
 mod logging;
