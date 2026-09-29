@@ -588,3 +588,24 @@ fn request_from_an_old_generation_gets_an_empty_answer_tagged_old() {
     assert_eq!(g, doc.generation());
     assert_eq!(texts(&lines), ["zz", "yyyyyyyy"]);
 }
+
+#[test]
+fn blocking_helpers_report_the_generation() {
+    let src = Arc::new(MemSource::new(numbered(50)));
+    let doc = Document::from_source_with(src.clone(), "mem", small_opts());
+    let len = numbered(50).len() as u64;
+    wait_ready(&doc, len);
+    let (g, lines) = doc.read_lines_blocking_with_generation(10, 2);
+    assert_eq!(g, doc.generation());
+    assert_eq!(texts(&lines), ["line 10", "line 11"]);
+    assert_eq!(doc.read_lines_blocking(10, 2), lines);
+    let (g2, pos) = doc.line_of_offset_with_generation(len - 3).unwrap();
+    assert_eq!(g2, g);
+    assert_eq!(pos.line, 49);
+    src.replace(b"only\n".to_vec());
+    doc.refresh();
+    wait_ready(&doc, 5);
+    let (g3, lines) = doc.read_lines_blocking_with_generation(0, 5);
+    assert!(g3 > g);
+    assert_eq!(texts(&lines), ["only"]);
+}

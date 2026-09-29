@@ -729,6 +729,22 @@ impl Document {
         }
     }
 
+    /// Like [`Document::line_of_offset`], but also returns the generation the
+    /// answer belongs to (captured before the read; if the generation changed
+    /// meanwhile, an [`io::ErrorKind::Interrupted`] error is returned so the
+    /// caller retries with fresh offsets).
+    pub fn line_of_offset_with_generation(&self, offset: u64) -> io::Result<(u64, LinePosition)> {
+        let generation = self.generation();
+        let pos = self.line_of_offset(offset)?;
+        if self.generation() != generation {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "document generation changed while reading",
+            ));
+        }
+        Ok((generation, pos))
+    }
+
     /// Start offset of line `line`, or `None` if it is not (yet) in the
     /// indexed region. Same threading caveat as [`Document::line_of_offset`].
     pub fn offset_of_line(&self, line: u64) -> io::Result<Option<u64>> {
@@ -742,9 +758,27 @@ impl Document {
     /// [`LineRequest::Range`]). Errors yield an empty vector. For worker
     /// threads only.
     pub fn read_lines_blocking(&self, first: u64, count: usize) -> Vec<Line> {
-        self.shared
+        self.read_lines_blocking_with_generation(first, count).1
+    }
+
+    /// Like [`Document::read_lines_blocking`], but also returns the
+    /// generation the lines belong to. The generation is captured before the
+    /// read; if it changed while reading, the lines are discarded (empty
+    /// vector) so they can never be paired with the wrong generation.
+    pub fn read_lines_blocking_with_generation(
+        &self,
+        first: u64,
+        count: usize,
+    ) -> (u64, Vec<Line>) {
+        let generation = self.generation();
+        let lines = self
+            .shared
             .read_request(&LineRequest::Range { first, count })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if self.generation() != generation {
+            return (generation, Vec::new());
+        }
+        (generation, lines)
     }
 
     /// Display name (file name or the name given at creation).
