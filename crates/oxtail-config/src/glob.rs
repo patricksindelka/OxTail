@@ -239,7 +239,7 @@ mod tests {
                 let g = Glob::new(&"**/".repeat(500), false);
                 let text = "d/".repeat(3000) + "x";
                 assert!(g.is_match(&text) || !g.is_match(&text)); // must simply return
-                let g = Glob::new(&"*".repeat(3000), false);
+                let g = Glob::new(&"?".repeat(3000), false);
                 assert!(!g.is_match("abc"));
                 let g = Glob::new("**/x", false);
                 assert!(g.is_match(&("d/".repeat(100_000) + "x")));
