@@ -47,9 +47,10 @@ How the file is read:
 | `notifications_enabled` | `true` | Desktop notifications for rules with `alert = true`. Window: **Desktop notifications for alert rules**. |
 | `renderer` | `"auto"` | `"auto"`, `"wgpu"` or `"glow"`. Read at start-up; `--renderer` overrides it. See [Troubleshooting](troubleshooting.md). |
 | `recent_files_limit` | `20` | How many recent files to remember, at most 500. |
-| `keymap` | `"standard"` | `"standard"` or `"less"`. Stored, but the keys are fixed in this version. See [Coming in 1.0](introduction.md#coming-in-10). |
-| `custom_keybindings` | empty | A table from action name to key. Stored, not used yet. |
-| `update_check` | `false` | Stored, not used yet. When the key is missing, the default is `true` for an installed copy and `false` for a portable one, so a portable copy never checks. |
+| `show_minimap` | `true` | Show the minimap next to the scrollbar (**View > Minimap**). |
+| `keymap` | `"standard"` | `"standard"` or `"less"` (adds `g`, `G`, `/`, `n`, `N`, `F`, `j`, `k`, `Space`, `b`). See [Keyboard shortcuts](shortcuts.md). |
+| `custom_keybindings` | empty | A table from action id to key, overriding the preset: `"view.wrap" = "Mod+Shift+W"`, or `"none"` to unbind. See [Changing keys](shortcuts.md#changing-keys). |
+| `update_check` | `false` | Check for a newer release at most once a day. When the key is missing, the default is `true` for an installed copy and `false` for a portable one, so a portable copy never checks. OxTail only tells you; it never downloads anything. See [Integration and updates](install.md#integration-and-updates). |
 | `follow_poll_interval_ms` | `250` | Stored (20 to 60,000). In this version OxTail polls adaptively, from 250 ms to about a second, and does not read this key. |
 | `font_family` | `""` | Stored, not used yet: the built-in monospace font is always used. |
 

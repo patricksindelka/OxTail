@@ -146,4 +146,4 @@ Skills in `.claude/skills/`: `verify` (full check suite) and `milestone`
 | M3 Highlighting and profiles | done |
 | M4 Columns | done (visual check on real displays pending) |
 | M5 Time and multi-file | done, incl. filtering merged views (visual check on real displays pending) |
-| M6 Polish and 1.0 | in progress: packaging/release workflow and user guide + profile gallery done; command palette, keymaps (less, custom bindings), settings UI gaps, system integration, update check, accessibility pass to do |
+| M6 Polish and 1.0 | done: command palette, keymaps (standard, less, custom bindings), settings UI, system integration, update check, accessibility pass, packaging/release workflow, user guide + profile gallery. Open: signing certificates (workflow ready, needs secrets), submitting winget/Homebrew/Scoop manifests, visual check on real displays |

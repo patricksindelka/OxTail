@@ -53,13 +53,6 @@ pages only point back to this list (the settings reference marks the keys that
 are stored but not used yet). Nothing else in this guide describes a feature that
 is missing.
 
-* A command palette and a `less`-style key preset.
-* Remappable keys. The settings file already has `keymap` and `custom_keybindings`
-  keys, but the shortcuts are fixed in this version.
-* An update check (`update_check` in the settings file is stored but not used) and
-  opt-in system integration (file associations, "Open with OxTail").
-* A settings window that covers every option. Today it has the ones described
-  in [Settings reference](settings.md); the rest are edited in `settings.toml`.
 * Signed installers and package manager entries (MSI, DMG, deb, rpm, AppImage,
   Flatpak, winget, Homebrew, Scoop). Portable builds and building from source are
   what this guide describes.
