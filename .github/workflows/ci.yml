@@ -355,6 +355,13 @@ jobs:
           (cd dist && tar -czf "release/oxtail-$VERSION-manifests.tar.gz" manifests)
       - name: Create GitHub Release
         run: |
+          # A release made by hand in the web UI (which also makes the tag)
+          # gets the packages attached instead of failing the job.
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --clobber dist/release/*
+            gh release edit "$GITHUB_REF_NAME" --title "OxTail $VERSION"
+            exit 0
+          fi
           flags=(--title "OxTail $VERSION" --generate-notes --verify-tag)
           case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
           gh release create "$GITHUB_REF_NAME" "${flags[@]}" dist/release/*
