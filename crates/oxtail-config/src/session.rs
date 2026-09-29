@@ -17,7 +17,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ConfigError, write_atomic};
+use crate::{ConfigError, DataMode, write_atomic};
 
 /// Prefix marking an executable-relative stored path.
 const REL_PREFIX: &str = "@exe/";
@@ -81,6 +81,32 @@ pub enum LayoutNode {
 }
 
 impl LayoutNode {
+    /// Rewrites tab indices through `remap`; leaves of removed tabs vanish and
+    /// their split collapses to the sibling.
+    fn remap(self, remap: &[Option<usize>]) -> Option<LayoutNode> {
+        match self {
+            LayoutNode::Leaf { tab } => remap
+                .get(tab)
+                .copied()
+                .flatten()
+                .map(|tab| LayoutNode::Leaf { tab }),
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => match (first.remap(remap), second.remap(remap)) {
+                (Some(first), Some(second)) => Some(LayoutNode::Split {
+                    direction,
+                    ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (a, b) => a.or(b),
+            },
+        }
+    }
+
     fn depth_ok(&self, max_tab: usize, budget: &mut usize) -> bool {
         if *budget == 0 {
             return false;
@@ -169,6 +195,9 @@ pub const SESSION_VERSION: u32 = 1;
 #[derive(Clone, Debug)]
 pub struct PathMapper {
     exe_dir: PathBuf,
+    /// Whether [`PathMapper::to_stored`] may write `@exe/` paths. Resolving
+    /// existing `@exe/` entries works either way.
+    relativise: bool,
 }
 
 impl PathMapper {
@@ -176,7 +205,19 @@ impl PathMapper {
     pub fn for_exe(exe_path: &Path) -> Self {
         Self {
             exe_dir: exe_path.parent().map(Path::to_path_buf).unwrap_or_default(),
+            relativise: true,
         }
+    }
+
+    /// A mapper for the given data-folder mode. Only [`DataMode::Portable`]
+    /// stores executable-relative paths: in any other mode the session file
+    /// may be shared by installs at different locations (e.g. two copies
+    /// using one `%APPDATA%\OxTail\session.json`), where `@exe/../..` would
+    /// resolve differently. Existing `@exe/` entries are still understood.
+    pub fn for_mode(mode: &DataMode, exe_path: &Path) -> Self {
+        let mut m = Self::for_exe(exe_path);
+        m.relativise = matches!(mode, DataMode::Portable);
+        m
     }
 
     /// A mapper for the running executable.
@@ -188,11 +229,12 @@ impl PathMapper {
     pub fn absolute_only() -> Self {
         Self {
             exe_dir: PathBuf::new(),
+            relativise: false,
         }
     }
 
     fn base(&self) -> Option<PathBuf> {
-        if !self.exe_dir.is_absolute() {
+        if !self.relativise || !self.exe_dir.is_absolute() {
             return None;
         }
         if cfg!(windows) {
@@ -305,28 +347,87 @@ impl Session {
     }
 
     /// Serialises with paths converted through `mapper`.
+    ///
+    /// Paths that are not valid UTF-8 cannot be stored in JSON without
+    /// changing them, so they are **skipped** with a warning: tabs with such a
+    /// path are dropped (the layout and active tab are remapped), bookmarks
+    /// and recent-file entries are dropped. One odd file name never blocks
+    /// saving the rest of the session.
+    ///
+    /// Entries stored executable-relative also get their absolute path in a
+    /// top-level `absolute_paths` object (stored string to absolute path);
+    /// loading prefers it when that path exists.
     pub fn to_json(&self, mapper: &PathMapper) -> Result<String, ConfigError> {
-        let map = |p: &Path| mapper.to_stored(p);
-        let mut v = serde_json::to_value(self)?;
+        let clean = self.without_non_utf8_paths();
+        let mut absolute = serde_json::Map::new();
+        let mut map = |p: &Path| {
+            let stored = mapper.to_stored(p);
+            if stored.starts_with(REL_PREFIX)
+                && let Some(abs) = p.to_str()
+            {
+                absolute.insert(stored.clone(), Value::String(abs.to_string()));
+            }
+            stored
+        };
+        let mut v = serde_json::to_value(&clean)?;
         // Rewrite the path-carrying fields.
         if let Some(tabs) = v.get_mut("tabs").and_then(Value::as_array_mut) {
-            for (t, orig) in tabs.iter_mut().zip(&self.tabs) {
+            for (t, orig) in tabs.iter_mut().zip(&clean.tabs) {
                 t["path"] = Value::String(map(&orig.path));
             }
         }
         v["bookmarks"] = Value::Object(
-            self.bookmarks
+            clean
+                .bookmarks
                 .iter()
                 .map(|(p, b)| Ok((map(p), serde_json::to_value(b)?)))
                 .collect::<Result<_, serde_json::Error>>()?,
         );
         v["recent_files"] = Value::Array(
-            self.recent_files
+            clean
+                .recent_files
                 .iter()
                 .map(|p| Value::String(map(p)))
                 .collect(),
         );
+        if !absolute.is_empty() {
+            v["absolute_paths"] = Value::Object(absolute);
+        }
         Ok(serde_json::to_string_pretty(&v)?)
+    }
+
+    /// A copy without any path that is not valid UTF-8.
+    fn without_non_utf8_paths(&self) -> Session {
+        let mut s = self.clone();
+        let mut remap: Vec<Option<usize>> = Vec::with_capacity(s.tabs.len());
+        let mut kept = Vec::new();
+        for t in s.tabs.drain(..) {
+            if t.path.to_str().is_some() {
+                remap.push(Some(kept.len()));
+                kept.push(t);
+            } else {
+                tracing::warn!("session: skipping tab with non-UTF-8 path {:?}", t.path);
+                remap.push(None);
+            }
+        }
+        s.tabs = kept;
+        s.active_tab = remap.get(s.active_tab).copied().flatten().unwrap_or(0);
+        s.layout = s.layout.take().and_then(|l| l.remap(&remap));
+        s.bookmarks.retain(|p, _| {
+            let ok = p.to_str().is_some();
+            if !ok {
+                tracing::warn!("session: skipping bookmarks of non-UTF-8 path {p:?}");
+            }
+            ok
+        });
+        s.recent_files.retain(|p| {
+            let ok = p.to_str().is_some();
+            if !ok {
+                tracing::warn!("session: skipping recent file with non-UTF-8 path {p:?}");
+            }
+            ok
+        });
+        s
     }
 
     /// Parses leniently: anything unusable is dropped, never an error.
@@ -335,6 +436,25 @@ impl Session {
             return Session::new();
         };
         let mut s = Session::new();
+        let absolute: BTreeMap<&str, &str> = obj
+            .get("absolute_paths")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| Some((k.as_str(), v.as_str()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Prefer the stored absolute path when it still exists.
+        let resolve = |stored: &str| -> PathBuf {
+            if let Some(abs) = absolute.get(stored) {
+                let abs = Path::new(abs);
+                if abs.is_absolute() && abs.exists() {
+                    return abs.to_path_buf();
+                }
+            }
+            mapper.from_stored(stored)
+        };
         if let Some(Value::Array(tabs)) = obj.get("tabs") {
             for t in tabs.iter().take(MAX_TABS) {
                 if let Ok(mut tab) = serde_json::from_value::<TabState>(t.clone()) {
@@ -342,7 +462,7 @@ impl Session {
                     if stored.is_empty() {
                         continue;
                     }
-                    tab.path = mapper.from_stored(stored);
+                    tab.path = resolve(stored);
                     s.tabs.push(tab);
                 }
             }
@@ -361,7 +481,7 @@ impl Session {
             for (path, list) in b.iter().take(MAX_FILES_WITH_BOOKMARKS) {
                 if let Ok(mut list) = serde_json::from_value::<Vec<Bookmark>>(list.clone()) {
                     list.truncate(MAX_BOOKMARKS_PER_FILE);
-                    s.bookmarks.insert(mapper.from_stored(path), list);
+                    s.bookmarks.insert(resolve(path), list);
                 }
             }
         }
@@ -370,7 +490,7 @@ impl Session {
                 .iter()
                 .filter_map(Value::as_str)
                 .take(MAX_RECENT)
-                .map(|p| mapper.from_stored(p))
+                .map(resolve)
                 .collect();
         }
         s.window = obj
@@ -471,10 +591,7 @@ mod tests {
             json.contains("\"/var/log/syslog\""),
             "outside the stick stays absolute: {json}"
         );
-        assert!(
-            !json.contains("/media/usb"),
-            "no absolute stick path leaks: {json}"
-        );
+        assert!(json.contains("absolute_paths"), "{json}");
         let back = Session::from_json_lenient(&json, &mapper());
         assert_eq!(back, s);
     }
@@ -598,5 +715,99 @@ mod tests {
                 prop_assert_eq!(m.from_stored(&m.to_stored(&p)), p);
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_are_skipped_not_fatal() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+        let bad = PathBuf::from(OsStr::from_bytes(b"/var/log/\xff\xfe.log"));
+        let mut s = Session::new();
+        s.tabs.push(TabState {
+            path: "/var/log/a.log".into(),
+            ..TabState::default()
+        });
+        s.tabs.push(TabState {
+            path: bad.clone(),
+            ..TabState::default()
+        });
+        s.tabs.push(TabState {
+            path: "/var/log/c.log".into(),
+            ..TabState::default()
+        });
+        s.active_tab = 2;
+        s.layout = Some(LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf { tab: 1 }),
+            second: Box::new(LayoutNode::Leaf { tab: 2 }),
+        });
+        s.bookmarks.insert(bad.clone(), vec![Bookmark::default()]);
+        s.recent_files = vec![bad, "/var/log/a.log".into()];
+        let m = PathMapper::absolute_only();
+        let json = s.to_json(&m).expect("must not fail");
+        let back = Session::from_json_lenient(&json, &m);
+        let paths: Vec<_> = back.tabs.iter().map(|t| t.path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/var/log/a.log"),
+                PathBuf::from("/var/log/c.log")
+            ]
+        );
+        assert_eq!(back.active_tab, 1);
+        assert_eq!(back.layout, Some(LayoutNode::Leaf { tab: 1 }));
+        assert!(back.bookmarks.is_empty());
+        assert_eq!(back.recent_files, vec![PathBuf::from("/var/log/a.log")]);
+    }
+
+    #[test]
+    fn installed_mode_never_relativises() {
+        let exe = Path::new("/media/usb/oxtail/oxtail");
+        let m = PathMapper::for_mode(&DataMode::Installed, exe);
+        assert_eq!(
+            m.to_stored(Path::new("/media/usb/logs/x.log")),
+            "/media/usb/logs/x.log"
+        );
+        let m = PathMapper::for_mode(&DataMode::Cli, exe);
+        assert_eq!(
+            m.to_stored(Path::new("/media/usb/logs/x.log")),
+            "/media/usb/logs/x.log"
+        );
+        let m = PathMapper::for_mode(&DataMode::Portable, exe);
+        assert_eq!(
+            m.to_stored(Path::new("/media/usb/logs/x.log")),
+            "@exe/../logs/x.log"
+        );
+    }
+
+    #[test]
+    fn absolute_path_preferred_when_it_exists() {
+        let t = tempfile::tempdir().expect("tempdir");
+        let stick = t.path().join("stick");
+        let exe = stick.join("oxtail/oxtail");
+        let logs = stick.join("logs");
+        fs::create_dir_all(&logs).expect("mkdir");
+        let file = logs.join("x.log");
+        fs::write(&file, "x").expect("w");
+        let mut s = Session::new();
+        s.tabs.push(TabState {
+            path: file.clone(),
+            ..TabState::default()
+        });
+        s.recent_files = vec![file.clone()];
+        let portable = PathMapper::for_mode(&DataMode::Portable, &exe);
+        let json = s.to_json(&portable).expect("json");
+        assert!(json.contains("@exe/"), "{json}");
+        // Same session file read by an install at another depth: the absolute
+        // path (which exists) wins over the mis-resolving relative one.
+        let other = PathMapper::for_exe(&t.path().join("deep/er/oxtail"));
+        let back = Session::from_json_lenient(&json, &other);
+        assert_eq!(back.tabs[0].path, file);
+        assert_eq!(back.recent_files, vec![file]);
+        // When the absolute path is gone the relative form is used.
+        let json = json.replace(&t.path().to_string_lossy().to_string(), "/nonexistent");
+        let back = Session::from_json_lenient(&json, &portable);
+        assert_eq!(back.tabs[0].path, logs.join("x.log"));
     }
 }

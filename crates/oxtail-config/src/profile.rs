@@ -43,28 +43,76 @@ impl Profile {
     }
 
     /// Saves as `<dir>/<sanitised name>.toml` atomically and returns the path.
+    ///
+    /// Sanitising maps every character that is not alphanumeric or `-` to `_`,
+    /// which can make different names collide ("Nginx access" and
+    /// "Nginx_access"): a file that already holds a *different* profile is
+    /// never overwritten, a numeric suffix (`-2`, `-3`, ...) is used instead.
+    /// Windows reserved device names (`CON`, `NUL`, `COM1`, ...) get a leading
+    /// underscore. Saving the same profile again reuses its file.
     pub fn save_to_dir(&self, dir: &Path) -> Result<std::path::PathBuf, ConfigError> {
-        let stem: String = self
-            .name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' {
-                    c
-                } else {
-                    '_'
+        let stem = safe_stem(&self.name);
+        let mut n = 1u32;
+        let path = loop {
+            let candidate = if n == 1 {
+                dir.join(format!("{stem}.toml"))
+            } else {
+                dir.join(format!("{stem}-{n}.toml"))
+            };
+            match fs::read(&candidate) {
+                Err(_) if !candidate.exists() => break candidate,
+                Ok(bytes)
+                    if Profile::from_toml_str(&String::from_utf8_lossy(&bytes))
+                        .is_ok_and(|p| p.name == self.name) =>
+                {
+                    break candidate;
                 }
-            })
-            .collect();
-        let stem = if stem.is_empty() {
-            "profile".into()
-        } else {
-            stem
+                _ => {}
+            }
+            n += 1;
+            if n > 10_000 {
+                return Err(ConfigError::io(
+                    &candidate,
+                    std::io::Error::other("too many profiles with similar names"),
+                ));
+            }
         };
-        let path = dir.join(format!("{stem}.toml"));
         write_atomic(&path, self.to_toml_string()?.as_bytes())
             .map_err(|e| ConfigError::io(&path, e))?;
         Ok(path)
     }
+}
+
+/// File-name stem for a profile name: sanitised, never empty, not a Windows
+/// reserved device name, at most 100 characters.
+fn safe_stem(name: &str) -> String {
+    let mut stem: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(100)
+        .collect();
+    if stem.is_empty() {
+        stem = "profile".into();
+    }
+    if is_reserved_windows_name(&stem) {
+        stem.insert(0, '_');
+    }
+    stem
+}
+
+fn is_reserved_windows_name(stem: &str) -> bool {
+    let up = stem.to_ascii_uppercase();
+    matches!(up.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|p| {
+            up.strip_prefix(p)
+                .is_some_and(|d| d.len() == 1 && d.as_bytes()[0].is_ascii_digit())
+        })
 }
 
 /// A loaded value together with the non-fatal problems met while loading it.
@@ -437,5 +485,44 @@ alert = true
         let dir = tempfile::tempdir().expect("tempdir");
         let path = prof.save_to_dir(dir.path()).expect("save");
         assert!(path.ends_with("Go_service__logfmt_.toml"), "{path:?}");
+    }
+
+    fn named(name: &str) -> Profile {
+        Profile {
+            name: name.into(),
+            ..Profile::default()
+        }
+    }
+
+    #[test]
+    fn colliding_names_get_distinct_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = named("Nginx access").save_to_dir(dir.path()).expect("a");
+        let b = named("Nginx_access").save_to_dir(dir.path()).expect("b");
+        assert_ne!(a, b);
+        // Re-saving reuses each profile's own file.
+        assert_eq!(
+            named("Nginx access").save_to_dir(dir.path()).expect("a2"),
+            a
+        );
+        assert_eq!(
+            named("Nginx_access").save_to_dir(dir.path()).expect("b2"),
+            b
+        );
+        let loaded = ProfileSet::load_dir(dir.path());
+        assert!(loaded.value.by_name("Nginx access").is_some());
+        assert!(loaded.value.by_name("Nginx_access").is_some());
+    }
+
+    #[test]
+    fn reserved_windows_names_are_escaped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for n in ["CON", "nul", "Com1", "LPT9", "aux", "PRN"] {
+            let p = named(n).save_to_dir(dir.path()).expect("save");
+            let stem = p.file_stem().expect("stem").to_string_lossy().to_string();
+            assert!(stem.starts_with('_'), "{stem}");
+        }
+        let p = named("COM10").save_to_dir(dir.path()).expect("save");
+        assert!(p.ends_with("COM10.toml"));
     }
 }

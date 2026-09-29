@@ -27,6 +27,10 @@ enum Tok {
     },
 }
 
+/// Longest supported pattern, in tokens. A longer pattern compiles to a glob
+/// that matches nothing.
+pub const MAX_TOKENS: usize = 1024;
+
 /// A compiled glob pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Glob {
@@ -34,17 +38,26 @@ pub struct Glob {
     ci: bool,
     has_slash: bool,
     specificity: usize,
+    /// Pattern exceeded [`MAX_TOKENS`]: matches nothing.
+    never: bool,
 }
 
 impl Glob {
     /// Compiles `pattern`; `case_insensitive` folds ASCII and simple Unicode
-    /// case. Never fails: an unterminated `[` is taken literally.
+    /// case. Never fails: an unterminated `[` is taken literally, and a pattern
+    /// longer than [`MAX_TOKENS`] tokens matches nothing.
     pub fn new(pattern: &str, case_insensitive: bool) -> Glob {
         let chars: Vec<char> = pattern.replace('\\', "\u{0}").chars().collect();
         // A NUL stands for a backslash separator and becomes `/` below.
         let mut toks = Vec::new();
         let mut i = 0;
+        let mut never = false;
         while i < chars.len() {
+            if toks.len() > MAX_TOKENS {
+                never = true;
+                toks.clear();
+                break;
+            }
             let c = chars[i];
             match c {
                 '*' => {
@@ -88,6 +101,10 @@ impl Glob {
                 }
             }
         }
+        if toks.len() > MAX_TOKENS {
+            never = true;
+            toks.clear();
+        }
         let has_slash = toks
             .iter()
             .any(|t| matches!(t, Tok::Lit('/') | Tok::DeepSlash));
@@ -100,6 +117,7 @@ impl Glob {
             ci: case_insensitive,
             has_slash,
             specificity,
+            never,
         }
     }
 
@@ -110,62 +128,48 @@ impl Glob {
     }
 
     /// Whether `text` matches the whole pattern.
+    ///
+    /// Iterative two-row dynamic programme: constant stack, `O(pattern * text)`
+    /// time, `O(text)` memory.
     pub fn is_match(&self, text: &str) -> bool {
-        let text: Vec<char> = text.chars().map(|c| fold(c, self.ci)).collect();
-        let n = self.toks.len();
-        let m = text.len();
-        if n.saturating_mul(m + 1) > 4_000_000 {
+        if self.never {
             return false;
         }
-        // memo[i * (m + 1) + j]: does toks[i..] match text[j..]? 0 unknown, 1 yes, 2 no.
-        let mut memo = vec![0u8; (n + 1) * (m + 1)];
-        self.go(0, 0, &text, &mut memo)
-    }
-
-    fn go(&self, i: usize, j: usize, text: &[char], memo: &mut [u8]) -> bool {
+        let text: Vec<char> = text.chars().map(|c| fold(c, self.ci)).collect();
         let m = text.len();
-        let key = i * (m + 1) + j;
-        match memo[key] {
-            1 => return true,
-            2 => return false,
-            _ => {}
+        if self.toks.len().saturating_mul(m + 1) > 20_000_000 {
+            return false;
         }
-        let r = if i == self.toks.len() {
-            j == m
-        } else {
-            match &self.toks[i] {
-                Tok::Lit(c) => j < m && text[j] == *c && self.go(i + 1, j + 1, text, memo),
-                Tok::One => j < m && text[j] != '/' && self.go(i + 1, j + 1, text, memo),
-                Tok::Class { negate, ranges } => {
-                    j < m
-                        && text[j] != '/'
-                        && (ranges.iter().any(|&(a, b)| a <= text[j] && text[j] <= b) != *negate)
-                        && self.go(i + 1, j + 1, text, memo)
-                }
-                Tok::Star => {
-                    // Try consuming 0.. non-slash characters.
-                    let mut k = j;
-                    loop {
-                        if self.go(i + 1, k, text, memo) {
-                            break true;
-                        }
-                        if k < m && text[k] != '/' {
-                            k += 1;
-                        } else {
-                            break false;
-                        }
+        // next[j]: does toks[i+1..] match text[j..]?  Start with i = n.
+        let mut next = vec![false; m + 1];
+        next[m] = true;
+        let mut cur = vec![false; m + 1];
+        for tok in self.toks.iter().rev() {
+            let mut any_slash_then = false; // DeepSlash helper, see below
+            for j in (0..=m).rev() {
+                let ch = text.get(j).copied();
+                cur[j] = match tok {
+                    Tok::Lit(c) => ch == Some(*c) && next[j + 1],
+                    Tok::One => ch.is_some_and(|c| c != '/') && next[j + 1],
+                    Tok::Class { negate, ranges } => {
+                        ch.is_some_and(|c| {
+                            c != '/' && (ranges.iter().any(|&(a, b)| a <= c && c <= b) != *negate)
+                        }) && next[j + 1]
                     }
-                }
-                Tok::Deep => (j..=m).any(|k| self.go(i + 1, k, text, memo)),
-                Tok::DeepSlash => {
-                    // Zero directories, or any prefix ending in '/'.
-                    self.go(i + 1, j, text, memo)
-                        || (j..m).any(|k| text[k] == '/' && self.go(i + 1, k + 1, text, memo))
-                }
+                    Tok::Star => next[j] || (ch.is_some_and(|c| c != '/') && cur[j + 1]),
+                    Tok::Deep => next[j] || (ch.is_some() && cur[j + 1]),
+                    Tok::DeepSlash => {
+                        // Zero directories, or any prefix ending in '/'.
+                        if ch == Some('/') && next[j + 1] {
+                            any_slash_then = true;
+                        }
+                        next[j] || any_slash_then
+                    }
+                };
             }
-        };
-        memo[key] = if r { 1 } else { 2 };
-        r
+            std::mem::swap(&mut next, &mut cur);
+        }
+        next[0]
     }
 
     /// Matches a file path. Patterns containing a `/` are matched against the
@@ -224,6 +228,33 @@ fn parse_class(chars: &[char], start: usize, ci: bool) -> Option<(Tok, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pathological_pattern_does_not_overflow_stack() {
+        let h = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let g = Glob::new(&"**/".repeat(75_000), false);
+                assert!(!g.is_match(&"a/".repeat(1000)));
+                let g = Glob::new(&"**/".repeat(500), false);
+                let text = "d/".repeat(3000) + "x";
+                assert!(g.is_match(&text) || !g.is_match(&text)); // must simply return
+                let g = Glob::new(&"?".repeat(3000), false);
+                assert!(!g.is_match("abc"));
+                let g = Glob::new("**/x", false);
+                assert!(g.is_match(&("d/".repeat(100_000) + "x")));
+            })
+            .expect("spawn");
+        h.join().expect("no overflow or panic");
+    }
+
+    #[test]
+    fn over_long_pattern_never_matches() {
+        assert!(
+            !Glob::new(&"a".repeat(MAX_TOKENS + 1), false).is_match(&"a".repeat(MAX_TOKENS + 1))
+        );
+        assert!(Glob::new(&"a".repeat(MAX_TOKENS), false).is_match(&"a".repeat(MAX_TOKENS)));
+    }
 
     fn m(p: &str, t: &str) -> bool {
         Glob::new(p, false).is_match(t)

@@ -116,7 +116,17 @@ pub fn find_time_cancellable<A: LineAccess + ?Sized>(
                 samples.push((p, t));
                 lo = p + 1;
             }
-            None => hi = mid,
+            None if mid.saturating_add(PROBE_LIMIT) >= hi => hi = mid,
+            None => {
+                // No timestamp in the next PROBE_LIMIT lines, and more lines
+                // follow: a long timestamp-less block. Decide the direction
+                // from the last timestamp before the block instead of
+                // discarding the upper half.
+                match probe_back(mid)? {
+                    Some(t) if t < target => lo = mid + PROBE_LIMIT,
+                    _ => hi = mid,
+                }
+            }
         }
     }
 
@@ -175,6 +185,46 @@ mod tests {
             .iter()
             .position(|l| p.parse(l).is_some_and(|x| x >= t))
             .map(|i| i as u64)
+    }
+
+    struct Counting<'a> {
+        lines: &'a [String],
+        reads: std::cell::Cell<u64>,
+    }
+    impl LineAccess for Counting<'_> {
+        fn line_count(&self) -> u64 {
+            self.lines.len() as u64
+        }
+        fn line(&self, n: u64) -> Option<String> {
+            self.reads.set(self.reads.get() + 1);
+            self.lines.get(usize::try_from(n).ok()?).cloned()
+        }
+    }
+
+    #[test]
+    fn long_timestampless_block_at_probe_point_stays_logarithmic() {
+        let mut lines: Vec<String> = (0..10_000).map(|i| line(i * 10)).collect();
+        for l in &mut lines[4800..5400] {
+            *l = "    continuation without a timestamp".to_string();
+        }
+        let p = parser();
+        for t in [
+            target(80_000),
+            target(20_000),
+            target(99_990),
+            target(53_500),
+        ] {
+            let acc = Counting {
+                lines: &lines,
+                reads: std::cell::Cell::new(0),
+            };
+            assert_eq!(find_time(&acc, &p, t), naive(&lines, &p, t));
+            assert!(
+                acc.reads.get() < 3_000,
+                "linear fallback: {}",
+                acc.reads.get()
+            );
+        }
     }
 
     #[test]
