@@ -28,6 +28,9 @@ some_cmd | oxtail -                     # view standard input
 | `--data-dir PATH` | Use `PATH` as the data folder (settings, profiles, themes, session). See [Installation and portable mode](install.md). |
 | `--renderer R` | `auto` (default), `wgpu` or `glow` (`opengl` and `gl` are accepted for `glow`). Overrides the `renderer` setting. See [Troubleshooting](troubleshooting.md#the-window-does-not-open-or-is-blank). |
 | `--new-instance` | Do not hand the files to a running instance; start a new window even if one is running for the same data folder. |
+| `--integrate` | Register OxTail with the system ("Open with" entry, Start menu shortcut or desktop entry), print what was done and exit. See [Integration and updates](install.md#integration-and-updates). |
+| `--remove-integration` | Undo `--integrate` exactly, print what was removed and exit. Does nothing if OxTail is not integrated. |
+| `--check-update` | Ask GitHub whether a newer release exists (needs `curl`), print the result (newer, up to date, or no release published yet) and exit. |
 | `-V`, `--version` | Print the version (`oxtail 0.0.1`) and exit. |
 | `-h`, `--help` | Print the usage text and exit. |
 
@@ -53,11 +56,16 @@ data folders (for example two portable copies) never interfere.
 | Status | Meaning |
 |---|---|
 | 0 | Normal exit, `--help`, `--version`, or files handed to a running instance. |
-| 1 | The program could not start (for example no window could be created). The error is printed to standard error. |
+| 1 | The program could not start (for example no window could be created), or `--integrate`, `--remove-integration` or `--check-update` failed. The error is printed to standard error. `--check-update` exits 0 whether or not a newer release exists. |
 | 2 | Invalid command line. The message and `Try 'oxtail --help'` are printed to standard error. |
 
 On Windows, release builds are GUI-subsystem programs, so when started from a
-terminal `--help`, `--version` and error messages may not be printed there.
+terminal `--help`, `--version`, error messages and the text of `--integrate`,
+`--remove-integration` and `--check-update` may not be printed there. Redirect the
+output to see it (`oxtail --check-update | more`, `oxtail --integrate > out.txt`) or
+rely on the exit status; the Settings window has buttons for integration.
+`--integrate`, `--remove-integration` and `--check-update` cannot be combined
+with file arguments (status 2).
 
 ## Environment
 

@@ -27,6 +27,12 @@ OPTIONS:
         --data-dir PATH  Use PATH as the data folder (settings, profiles, session)
         --renderer R     auto (default), wgpu or glow
         --new-instance   Do not hand the files to a running instance; start a new one
+        --integrate      Register OxTail with the system (\"Open with\" entry, Start menu
+                         shortcut or desktop entry), print what was done, and exit
+        --remove-integration
+                         Undo --integrate exactly, print what was removed, and exit
+        --check-update   Ask GitHub for a newer release (needs curl), print the result
+                         and exit; status 0 if the check worked, 1 if it failed
     -V, --version        Print the version
     -h, --help           Print this help
 ";
@@ -52,6 +58,12 @@ pub struct Cli {
     pub renderer: Option<Renderer>,
     /// `--new-instance`.
     pub new_instance: bool,
+    /// `--integrate`.
+    pub integrate: bool,
+    /// `--remove-integration`.
+    pub remove_integration: bool,
+    /// `--check-update`.
+    pub check_update: bool,
     /// `--version`.
     pub version: bool,
     /// `--help`.
@@ -119,6 +131,9 @@ where
             }
             Long("new-instance") => cli.new_instance = true,
             Long("merge") => cli.merge = true,
+            Long("integrate") => cli.integrate = true,
+            Long("remove-integration") => cli.remove_integration = true,
+            Long("check-update") => cli.check_update = true,
             Value(v) => {
                 if v == "-" {
                     cli.stdin = true;
@@ -128,6 +143,14 @@ where
             }
             other => return Err(other.unexpected().to_string()),
         }
+    }
+    if (cli.integrate || cli.remove_integration || cli.check_update)
+        && (!cli.files.is_empty() || cli.stdin)
+    {
+        return Err(
+            "--integrate, --remove-integration and --check-update cannot be combined with files"
+                .into(),
+        );
     }
     Ok(cli)
 }
@@ -218,6 +241,21 @@ mod tests {
         assert!(r.merge);
         assert_eq!(r.files.len(), 2);
         assert!(!p(&["a.log"]).unwrap().to_request().merge);
+    }
+
+    #[test]
+    fn maintenance_flags() {
+        assert!(p(&["--integrate"]).unwrap().integrate);
+        assert!(p(&["--remove-integration"]).unwrap().remove_integration);
+        assert!(
+            p(&["--check-update", "--data-dir", "/x"])
+                .unwrap()
+                .check_update
+        );
+        assert!(p(&["--integrate", "a.log"]).is_err());
+        assert!(p(&["--check-update", "-"]).is_err());
+        let c = p(&["a.log"]).unwrap();
+        assert!(!c.integrate && !c.remove_integration && !c.check_update);
     }
 
     #[test]

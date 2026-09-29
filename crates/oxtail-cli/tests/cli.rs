@@ -34,6 +34,9 @@ fn help_lists_the_options() {
         "--data-dir",
         "--renderer",
         "--new-instance",
+        "--integrate",
+        "--remove-integration",
+        "--check-update",
         "-n",
     ] {
         assert!(t.contains(opt), "help misses {opt}:\n{t}");
@@ -119,4 +122,17 @@ fn ambiguous_profile_is_an_error() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(text(&out.stderr).contains("ambiguous"));
+}
+
+#[test]
+fn remove_integration_with_nothing_integrated_is_a_no_op() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = oxtail()
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("--remove-integration")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("nothing to remove"));
 }

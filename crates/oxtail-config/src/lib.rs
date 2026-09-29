@@ -13,6 +13,8 @@
 //! * [`Theme`] / [`ThemeSet`]: `themes/*.toml` and the built-in themes.
 //! * [`Session`]: `session.json` with paths relative to the executable.
 //! * [`ConfigWatcher`]: debounced hot-reload notifications.
+//! * [`integration`]: opt-in "Open with" / Start menu registration and its removal.
+//! * [`update`]: the opt-in, throttled update check (no auto-download).
 //!
 //! # Profile file shape
 //!
@@ -55,10 +57,12 @@ mod atomic;
 mod datadir;
 mod error;
 mod glob;
+pub mod integration;
 mod profile;
 mod session;
 mod settings;
 mod theme;
+pub mod update;
 mod watcher;
 
 pub use atomic::{TEMP_SUFFIX, write_atomic};

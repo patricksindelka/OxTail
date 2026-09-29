@@ -34,6 +34,60 @@ checks that a built binary only links libraries from an allowlist.
 Signed downloads, installers and package manager entries are described under
 [Coming in 1.0](introduction.md#coming-in-10).
 
+## Integration and updates
+
+### System integration (opt-in)
+
+OxTail never registers itself with your system. If you want it in the "Open with"
+menu of your file manager, use **Integrate with system** in the settings window
+(or run `oxtail --integrate`). **Remove** (`oxtail --remove-integration`) undoes
+exactly what was done. It never makes OxTail the default program for any file type.
+
+| System | What is created |
+|---|---|
+| Windows | Per user, no administrator rights: entries under `HKEY_CURRENT_USER\Software\Classes` (an application entry, the `OxTail.LogFile` type, and OxTail added to the "Open with" list of `.log`, `.txt`, `.out`, `.err` and `.trace`) and a Start menu shortcut. Explorer may need a moment to show them. |
+| Linux | `~/.local/share/applications/io.github.patricksindelka.OxTail.desktop` and the icon under `~/.local/share/icons/hicolor/` (`$XDG_DATA_HOME` is honoured). Your default applications (`mimeapps.list`) are not changed. |
+| macOS | Not available from the program. Move `OxTail.app` to Applications; Finder then lists it under "Open With". |
+
+Everything OxTail creates is recorded in `integration.json` in the data folder, and
+Remove uses only that record, so it works even if you moved or deleted the
+executable. Remove only ever touches what OxTail itself could have created: it
+ignores any other entry in the record. It never overwrites a file of yours (a
+`.desktop` file, icon or shortcut with the same name that OxTail did not
+create is left alone and reported), it never deletes a registry key that
+existed before (only the values OxTail set, and keys it created that are
+empty again), and it refuses to act if the data folder was made on another
+computer or account (for example a portable folder on a USB stick), so it can
+not delete another machine's entries. The entries point at the executable's current path: if you move a
+portable copy, run Integrate again (it updates the entries). Integration needs a
+writable data folder, because that is where the record is kept.
+
+If the data folder is lost, remove the entries by hand. On Linux delete
+`~/.local/share/applications/io.github.patricksindelka.OxTail.desktop` and
+`~/.local/share/icons/hicolor/256x256/apps/io.github.patricksindelka.OxTail.png`.
+On Windows delete `%APPDATA%\Microsoft\Windows\Start Menu\Programs\OxTail.lnk`,
+the registry keys `HKEY_CURRENT_USER\Software\Classes\OxTail.LogFile` and
+`...\Classes\Applications\oxtail.exe`, and the value `OxTail.LogFile` under
+`...\Classes\<ext>\OpenWithProgids` for `.log`, `.txt`, `.out`, `.err` and `.trace`.
+
+On Windows the release build is a GUI program without a console, so the
+Settings buttons are the primary way to integrate or remove. The command-line
+forms report success or failure through the exit status (0 or 1), and their text
+output is visible when it is redirected, for example `oxtail --check-update | more`
+or `oxtail --integrate > result.txt`. (Redirection relies on the standard
+handles the shell passes in; it is expected to work but has not been verified on
+every Windows shell.)
+
+### Update check
+
+When `update_check` is on (the default for an installed copy; off for a portable
+one), OxTail asks GitHub at most once a day whether a newer release exists, using
+the `curl` program that comes with Windows 10 and later, macOS and most Linux
+systems. On Windows it runs `System32\curl.exe`. If `curl` is missing or you are offline, nothing happens. OxTail only
+tells you about a newer version and links to the release page; it never downloads
+or replaces anything. `oxtail --check-update` runs the check once and prints the
+result. The time of the last check is kept in `update-check.json` in the data folder.
+
 ## Where OxTail keeps its data
 
 OxTail stores its settings, profiles, themes and session in one **data folder**.

@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use oxtail_config::{DataDir, Renderer, ResolveInput};
+use oxtail_config::{DataDir, Renderer, ResolveInput, update::LatestCheck};
 use oxtail_gui::{AppInit, ExternalOpen, OxTailApp};
 
 fn main() -> ExitCode {
@@ -36,12 +36,79 @@ fn main() -> ExitCode {
         println!("oxtail {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
+    if cli.integrate || cli.remove_integration || cli.check_update {
+        return maintenance(&cli);
+    }
     match run(cli) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("oxtail: {e:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `--integrate`, `--remove-integration` and `--check-update`: print and exit,
+/// without a window, an instance lock or a log file.
+fn maintenance(cli: &args::Cli) -> ExitCode {
+    let data_dir = DataDir::resolve(ResolveInput::from_environment(cli.data_dir.clone()));
+    let mut ok = true;
+    if cli.remove_integration {
+        match oxtail_config::integration::remove(&data_dir) {
+            Ok(done) if done.is_empty() => {
+                println!("OxTail was not integrated; nothing to remove.")
+            }
+            Ok(done) => done.iter().for_each(|l| println!("{l}")),
+            Err(e) => {
+                eprintln!("oxtail: {e}");
+                ok = false;
+            }
+        }
+    }
+    if cli.integrate {
+        let result = std::env::current_exe()
+            .map_err(|e| {
+                oxtail_config::ConfigError::Integration(format!("no executable path: {e}"))
+            })
+            .and_then(|exe| oxtail_config::integration::integrate(&data_dir, &exe));
+        match result {
+            Ok(done) => done.iter().for_each(|l| println!("{l}")),
+            Err(e) => {
+                eprintln!("oxtail: {e}");
+                ok = false;
+            }
+        }
+    }
+    if cli.check_update {
+        let current = env!("CARGO_PKG_VERSION");
+        match oxtail_config::update::check_latest_detailed(current) {
+            Ok(result) => {
+                match result {
+                    LatestCheck::Newer(r) => {
+                        println!(
+                            "OxTail {} is available (you have {current}): {}",
+                            r.version, r.url
+                        );
+                        if let Some(notes) = r.notes {
+                            println!("\n{notes}");
+                        }
+                    }
+                    LatestCheck::UpToDate => println!("OxTail {current} is up to date."),
+                    LatestCheck::NoRelease => println!("No release has been published yet."),
+                }
+                // Only a successful check resets the throttle of the automatic one.
+                let _ = oxtail_config::update::record_check(&data_dir);
+            }
+            Err(e) => {
+                eprintln!("oxtail: {e}");
+                ok = false;
+            }
+        }
+    }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

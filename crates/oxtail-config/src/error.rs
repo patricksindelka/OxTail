@@ -32,6 +32,13 @@ pub enum ConfigError {
     /// The data folder is in-memory mode, so nothing can be saved.
     #[error("settings are not persisted: {0}")]
     NotPersistent(String),
+    /// Registering with (or removing from) the operating system failed.
+    #[error("system integration: {0}")]
+    Integration(String),
+    /// The update check could not be completed (no `curl`, no network, bad
+    /// answer). A missing release or an unparseable version is not an error.
+    #[error("update check: {0}")]
+    Update(String),
 }
 
 impl ConfigError {
