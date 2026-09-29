@@ -49,8 +49,8 @@ tempfile = "3.27.0"
 eframe = { version = "0.35.0", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "glow", "wayland", "x11"] }
 egui = "0.35.0"
 egui_extras = "0.35.0"
-rfd = "0.17.2"
-notify-rust = "4.18.1"
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal", "pollster"] }
+notify-rust = { version = "4.18.1", default-features = false, features = ["z"] }
 interprocess = "2.4.4"
 lexopt = "0.3.2"
 
