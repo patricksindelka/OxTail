@@ -1,11 +1,19 @@
 //! Tabs and the session snapshot built from them.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use oxtail_config::{Bookmark, ProfileSet, Session, TabState, WindowGeometry};
+use oxtail_config::{
+    Bookmark, Profile, ProfileSet, Session, TabState, TimezoneSetting, WindowGeometry,
+};
 
+use crate::colspec::{columns_from_table, timestamp_from_table};
 use crate::docview::{BookmarkInfo, DocView};
+use crate::guistate::SavedStructure;
 use crate::highlight::choose_profile;
+use crate::mergeview::MergedView;
+use crate::panes::PaneId;
+use crate::structure::StructureInput;
 
 /// What a tab was asked to do when its document arrives.
 #[derive(Debug, Clone, Default)]
@@ -38,6 +46,8 @@ pub enum TabContent {
     Failed(String),
     /// The document is open.
     Ready(Box<DocView>),
+    /// Several documents merged by timestamp.
+    Merged(Box<MergedView>),
 }
 
 /// One tab.
@@ -59,6 +69,8 @@ pub struct Tab {
     /// The rules were edited and applied without saving: a profile detected
     /// later must not replace them.
     pub customized: bool,
+    /// The pane (split area) the tab is shown in.
+    pub pane: PaneId,
 }
 
 impl Tab {
@@ -73,6 +85,23 @@ impl Tab {
             content: TabContent::Opening(init),
             badge: 0,
             customized: false,
+            pane: 0,
+        }
+    }
+
+    /// The merged view, if this is a merged tab.
+    pub fn merged(&self) -> Option<&MergedView> {
+        match &self.content {
+            TabContent::Merged(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// The merged view, mutably.
+    pub fn merged_mut(&mut self) -> Option<&mut MergedView> {
+        match &mut self.content {
+            TabContent::Merged(m) => Some(m),
+            _ => None,
         }
     }
 
@@ -97,7 +126,7 @@ impl Tab {
         let base = match &self.content {
             TabContent::Opening(_) => format!("{} (opening\u{2026})", self.title),
             TabContent::Failed(_) => format!("{} (failed)", self.title),
-            TabContent::Ready(_) => self.title.clone(),
+            TabContent::Ready(_) | TabContent::Merged(_) => self.title.clone(),
         };
         if self.badge > 0 {
             format!("({}) {base}", self.badge)
@@ -107,11 +136,52 @@ impl Tab {
     }
 }
 
-/// Selects and applies the profile of a freshly read first-lines sample.
-pub fn apply_sniffed_profile(tab: &mut Tab, profiles: &ProfileSet, lines: &[String]) {
-    if tab.customized {
-        return;
+/// What deciding a tab's structure needs besides the profile.
+pub struct StructureCtx {
+    /// What the user chose for this file before.
+    pub saved: Option<SavedStructure>,
+    /// The time zone setting.
+    pub tz: TimezoneSetting,
+    /// Wakes the event loop.
+    pub wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+/// The structure input for `profile`: its converted `columns` and `timestamp`
+/// tables. A malformed table is reported through `tracing` and ignored.
+pub fn structure_input(
+    profile: Option<&Profile>,
+    saved: Option<SavedStructure>,
+    tz: TimezoneSetting,
+) -> StructureInput {
+    let mut input = StructureInput {
+        saved,
+        tz: Some(tz),
+        ..StructureInput::default()
+    };
+    if let Some(p) = profile {
+        input.profile_name = Some(p.name.clone());
+        input.columns = p.columns.as_ref().and_then(|t| {
+            columns_from_table(t)
+                .map_err(|e| tracing::warn!("profile '{}': columns: {e}", p.name))
+                .ok()
+        });
+        input.timestamp = p.timestamp.as_ref().and_then(|t| {
+            timestamp_from_table(t)
+                .map_err(|e| tracing::warn!("profile '{}': timestamp: {e}", p.name))
+                .ok()
+        });
     }
+    input
+}
+
+/// Selects and applies the profile of a freshly read first-lines sample, and
+/// starts deciding the tab's column structure.
+pub fn apply_sniffed_profile(
+    tab: &mut Tab,
+    profiles: &ProfileSet,
+    lines: &[String],
+    sctx: StructureCtx,
+) {
     let forced = tab.forced_profile.clone();
     let path = tab
         .path
@@ -119,8 +189,14 @@ pub fn apply_sniffed_profile(tab: &mut Tab, profiles: &ProfileSet, lines: &[Stri
         .unwrap_or_else(|| PathBuf::from(&tab.title));
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
     let chosen = choose_profile(profiles, forced.as_deref(), &path, &refs);
+    let customized = tab.customized;
+    let StructureCtx { saved, tz, wake } = sctx;
+    let input = structure_input(chosen, saved, tz);
     if let Some(view) = tab.view_mut() {
-        view.hl.borrow_mut().set_profile(chosen);
+        if !customized {
+            view.hl.borrow_mut().set_profile(chosen);
+        }
+        view.begin_structure(input, wake);
     }
 }
 
@@ -192,7 +268,7 @@ pub fn build_session(
                 st.filters.clone_from(&init.filters);
                 st.search_query.clone_from(&init.search);
             }
-            TabContent::Failed(_) => {}
+            TabContent::Failed(_) | TabContent::Merged(_) => {}
         }
         s.tabs.push(st);
     }
@@ -263,6 +339,7 @@ mod tests {
             forced_profile: None,
             forced_encoding: None,
             customized: false,
+            pane: 0,
         }
     }
 

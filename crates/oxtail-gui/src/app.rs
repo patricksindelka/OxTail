@@ -5,7 +5,7 @@
 //! blocks: files open on worker threads, configuration is read and written
 //! by [`crate::persist`], notifications are raised by [`crate::alerts`].
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,13 +22,16 @@ use crate::alerts::{AlertEvent, AlertJob, AlertWorker, DesktopNotifier};
 use crate::colors::{Colors, select_theme};
 use crate::docview::{BookmarkInfo, DocView, ViewInit};
 use crate::find::{Dir, push_history};
+use crate::gototime::{GotoJob, GotoMsg, GotoTimeDialog, parse_goto_time};
+use crate::guistate::GuiState;
 use crate::keymap::{self, Action};
+use crate::panes::{PaneId, PaneTree};
 use crate::persist::{Job, Persist, PersistResult};
 use crate::request::OpenRequest;
 use crate::ruleeditor::{EditorAction, RuleEditor};
 use crate::rules::profile_with_rules;
 use crate::startup::{AppInit, ExternalOpen};
-use crate::tab::{Tab, TabContent, TabInit, apply_sniffed_profile, build_session};
+use crate::tab::{StructureCtx, Tab, TabContent, TabInit, apply_sniffed_profile, build_session};
 
 /// How often the session is saved when something changed.
 pub const SESSION_SAVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -56,6 +59,13 @@ pub enum AppMsg {
     DialogDone,
     /// The config watcher is running.
     Watcher(ConfigWatcher, Receiver<ConfigChanged>),
+    /// The files of a merged tab were opened (or opening failed).
+    MergeOpened {
+        /// The tab that asked for it.
+        tab_id: u64,
+        /// The sources or a user-presentable error.
+        result: Result<Vec<crate::merge::MergeSource>, String>,
+    },
 }
 
 /// A message under the menu bar.
@@ -83,6 +93,12 @@ pub struct GotoDialog {
 pub struct Windows {
     /// Go to line.
     pub goto: Option<GotoDialog>,
+    /// Go to time.
+    pub goto_time: Option<GotoTimeDialog>,
+    /// Merge tabs.
+    pub merge: Option<crate::appmerge::MergeDialog>,
+    /// Search across the open tabs.
+    pub cross: crate::cross::CrossSearchState,
     /// Settings.
     pub settings: bool,
     /// Keyboard shortcuts.
@@ -125,6 +141,23 @@ pub struct OxTailApp {
     last_session_save: Instant,
     settings_dirty_at: Option<Instant>,
     pub(crate) history_dirty: bool,
+    /// GUI-side state (column choices, pane layout, merged tabs).
+    pub(crate) gui_state: GuiState,
+    last_saved_gui_state: Option<GuiState>,
+    /// The split layout of the tab area.
+    pub(crate) panes: PaneTree,
+    /// The pane that has the keyboard focus.
+    pub(crate) focused_pane: PaneId,
+    pub(crate) next_pane_id: PaneId,
+    /// The active tab (by id) of each pane.
+    pub(crate) pane_active: HashMap<PaneId, u64>,
+    /// Panes showing the same file follow each other's cursor.
+    pub(crate) sync_cursor: bool,
+    pub(crate) sync_last: HashMap<u64, Option<u64>>,
+    /// Where the panes were drawn last frame (for tab drops).
+    pub(crate) pane_rects: Vec<(PaneId, egui::Rect)>,
+    /// The tab being dragged.
+    pub(crate) dragging_tab: Option<u64>,
     pub(crate) last_title: String,
     pub(crate) file_dialog_requested: bool,
     pub(crate) window: Option<WindowGeometry>,
@@ -137,6 +170,7 @@ struct RestoreTab {
     path: PathBuf,
     init: TabInit,
     active: bool,
+    pane: PaneId,
 }
 
 impl OxTailApp {
@@ -206,6 +240,16 @@ impl OxTailApp {
             last_session_save: Instant::now(),
             settings_dirty_at: None,
             history_dirty: false,
+            gui_state: startup.gui_state,
+            last_saved_gui_state: None,
+            panes: PaneTree::leaf(0),
+            focused_pane: 0,
+            next_pane_id: 1,
+            pane_active: HashMap::new(),
+            sync_cursor: false,
+            sync_last: HashMap::new(),
+            pane_rects: Vec::new(),
+            dragging_tab: None,
             last_title: String::new(),
             file_dialog_requested: false,
             window: startup.session.window,
@@ -243,12 +287,23 @@ impl OxTailApp {
         // Restored tabs first, then what was asked for on the command line.
         let restore = std::mem::take(&mut self.restore);
         for r in restore {
-            self.open_path(r.path, r.init, r.active);
+            self.open_path_in(r.path, r.init, r.active, r.pane);
+        }
+        self.restore_layout();
+        for def in self.gui_state.merged.clone() {
+            if def.paths.len() >= 2 {
+                self.open_merged_paths(def.paths);
+            }
         }
         let queued: Vec<OpenRequest> = self.queue.drain(..).collect();
         for req in queued {
             self.open_request(req);
         }
+    }
+
+    /// A sender for messages from worker threads to the UI.
+    pub(crate) fn msg_sender(&self) -> Sender<AppMsg> {
+        self.msg_tx.clone()
     }
 
     /// A callback that wakes the event loop (safe to call from any thread).
@@ -294,6 +349,7 @@ impl OxTailApp {
             self.restore.push(RestoreTab {
                 path: t.path.clone(),
                 active: i == session.active_tab,
+                pane: 0,
                 init: TabInit {
                     follow: t.follow,
                     start_lines: None,
@@ -311,13 +367,13 @@ impl OxTailApp {
 
     // -------------------------------------------------------------- opening
 
-    fn next_id(&mut self) -> u64 {
+    pub(crate) fn next_id(&mut self) -> u64 {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
         id
     }
 
-    fn open_options(&self, init: &TabInit, stdin: bool) -> OpenOptions {
+    pub(crate) fn open_options(&self, init: &TabInit, stdin: bool) -> OpenOptions {
         let encoding = init
             .encoding
             .as_deref()
@@ -349,6 +405,10 @@ impl OxTailApp {
             self.queue.push_back(req);
             return;
         }
+        if req.merge && req.files.len() >= 2 {
+            self.open_merged_paths(req.files.clone());
+            return;
+        }
         for path in &req.files {
             let abs = std::path::absolute(path).unwrap_or_else(|_| path.clone());
             if let Some(i) = self
@@ -377,14 +437,28 @@ impl OxTailApp {
     /// Starts opening `path` in a new tab. The tab shows "Opening..." until the
     /// worker thread delivers the document.
     pub fn open_path(&mut self, path: PathBuf, init: TabInit, activate: bool) -> u64 {
+        let pane = self.focused_pane;
+        self.open_path_in(path, init, activate, pane)
+    }
+
+    /// Like [`OxTailApp::open_path`], in a given pane.
+    pub fn open_path_in(
+        &mut self,
+        path: PathBuf,
+        init: TabInit,
+        activate: bool,
+        pane: PaneId,
+    ) -> u64 {
         let id = self.next_id();
         let title = path.file_name().map_or_else(
             || path.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
         let opts = self.open_options(&init, false);
-        self.tabs
-            .push(Tab::opening(id, title, Some(path.clone()), init));
+        let mut tab = Tab::opening(id, title, Some(path.clone()), init);
+        tab.pane = pane;
+        self.tabs.push(tab);
+        self.pane_active.entry(pane).or_insert(id);
         if activate {
             self.select_tab(self.tabs.len() - 1);
         }
@@ -419,8 +493,9 @@ impl OxTailApp {
             wrap: self.settings.wrap,
             ..TabInit::default()
         };
-        self.tabs
-            .push(Tab::opening(id, "<stdin>".into(), None, init));
+        let mut tab = Tab::opening(id, "<stdin>".into(), None, init);
+        tab.pane = self.focused_pane;
+        self.tabs.push(tab);
         self.select_tab(self.tabs.len() - 1);
         let tx = self.msg_tx.clone();
         let wake = self.waker();
@@ -453,7 +528,9 @@ impl OxTailApp {
             wrap: self.settings.wrap,
             ..TabInit::default()
         };
-        self.tabs.push(Tab::opening(id, title.into(), None, init));
+        let mut tab = Tab::opening(id, title.into(), None, init);
+        tab.pane = self.focused_pane;
+        self.tabs.push(tab);
         self.select_tab(self.tabs.len() - 1);
         let w = self.waker();
         doc.set_waker(Box::new(move || w()));
@@ -480,6 +557,7 @@ impl OxTailApp {
                         initial_line: init.initial_line,
                     },
                 );
+                view.wake = self.waker();
                 if !init.filters.is_empty() {
                     view.filter.set_from_query_strings(&init.filters);
                     view.filter.open = true;
@@ -562,11 +640,14 @@ impl OxTailApp {
 
     // ----------------------------------------------------------------- tabs
 
-    /// Makes tab `i` the active one.
+    /// Makes tab `i` the active one (and its pane the focused one).
     pub fn select_tab(&mut self, i: usize) {
         if i < self.tabs.len() {
             self.active = i;
             self.tabs[i].badge = 0;
+            let (id, pane) = (self.tabs[i].id, self.tabs[i].pane);
+            self.pane_active.insert(pane, id);
+            self.focused_pane = pane;
         }
     }
 
@@ -575,21 +656,54 @@ impl OxTailApp {
         if i >= self.tabs.len() {
             return;
         }
+        let closed_id = self.tabs[i].id;
+        let pane = self.tabs[i].pane;
+        let was_active_in_pane = self.pane_active.get(&pane) == Some(&closed_id);
         let tab = self.tabs.remove(i);
-        if let TabContent::Ready(view) = tab.content {
-            // Dropping a Document stops its actor thread, which may wait a
-            // few milliseconds; do that off the UI thread.
-            let doc = Arc::clone(&view.doc);
-            drop(view);
-            let _ = std::thread::Builder::new()
-                .name("oxtail-close".into())
-                .spawn(move || drop(doc));
+        self.sync_last.remove(&closed_id);
+        match tab.content {
+            TabContent::Ready(view) => {
+                // Merged tabs that share this document now have to drain its
+                // events themselves.
+                for t in &mut self.tabs {
+                    if let Some(m) = t.merged_mut() {
+                        m.adopt(&view.doc);
+                    }
+                }
+                // Dropping a Document stops its actor thread, which may wait a
+                // few milliseconds; do that off the UI thread.
+                let doc = Arc::clone(&view.doc);
+                drop(view);
+                let _ = std::thread::Builder::new()
+                    .name("oxtail-close".into())
+                    .spawn(move || drop(doc));
+            }
+            TabContent::Merged(m) => {
+                let _ = std::thread::Builder::new()
+                    .name("oxtail-close".into())
+                    .spawn(move || drop(m));
+            }
+            _ => {}
         }
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len().saturating_sub(1);
         } else if i < self.active {
             self.active -= 1;
         }
+        // The pane may be empty now, or have lost its active tab.
+        let remaining = self.tabs_in_pane(pane);
+        if remaining.is_empty() {
+            self.remove_pane(pane);
+        } else if was_active_in_pane {
+            // The tab that took its place, else the last one.
+            let next = remaining
+                .iter()
+                .copied()
+                .find(|&r| r >= i)
+                .unwrap_or(remaining[remaining.len() - 1]);
+            self.pane_active.insert(pane, self.tabs[next].id);
+        }
+        self.sync_active();
     }
 
     /// The active tab.
@@ -629,10 +743,18 @@ impl OxTailApp {
         let now = Instant::now();
         self.drain_messages(ctx);
         self.drain_persist(ctx);
+        self.poll_goto_time(ctx);
+        if self.windows.cross.poll() {
+            ctx.request_repaint();
+        }
+        if self.windows.cross.running {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         self.drain_external(ctx);
         self.handle_dropped_files(ctx);
         self.drain_config_changes();
         self.pump_tabs(ctx, now);
+        self.sync_cursors();
         self.drain_alerts();
         self.track_window(ctx);
         self.follow_system_theme(ctx);
@@ -652,6 +774,7 @@ impl OxTailApp {
                     });
                 }
                 AppMsg::DialogDone => self.file_dialog_open = false,
+                AppMsg::MergeOpened { tab_id, result } => self.finish_merge_open(tab_id, result),
                 AppMsg::Watcher(w, rx) => {
                     self._config_watcher = Some(w);
                     self.config_rx = Some(rx);
@@ -794,13 +917,41 @@ impl OxTailApp {
         let profiles = Arc::clone(&self.profiles);
         let notify = self.settings.notifications_enabled;
         let mut copied: Option<String> = None;
+        let tz = self.settings.timezone.clone();
+        let wake = self.waker();
         for i in 0..self.tabs.len() {
             let tab = &mut self.tabs[i];
             let (tab_id, title) = (tab.id, tab.title.clone());
+            let path = tab.path.clone();
+            if let Some(mv) = tab.merged_mut() {
+                if mv.pump(now) {
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                }
+                if mv.find.restart_at.is_some() {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+                if mv.toast.is_some() {
+                    ctx.request_repaint_after(Duration::from_secs(1));
+                }
+                continue;
+            }
             let Some(view) = tab.view_mut() else { continue };
+            view.set_time_zone(&tz);
             let out = view.pump(now);
+            if view.st.dirty {
+                view.st.dirty = false;
+                if let Some(p) = &path {
+                    self.gui_state.set_structure(p, view.st.saved());
+                }
+            }
             if out.repaint {
                 ctx.request_repaint();
+            }
+            if view.poll_tools() {
+                ctx.request_repaint();
+            }
+            if view.tools_busy() {
+                ctx.request_repaint_after(Duration::from_millis(100));
             }
             if let Some(text) = out.copied {
                 if out.copy_truncated {
@@ -848,7 +999,15 @@ impl OxTailApp {
                     })
                 });
             if let Some(lines) = sniffed {
-                apply_sniffed_profile(&mut self.tabs[i], &profiles, &lines);
+                let sctx = StructureCtx {
+                    saved: path
+                        .as_deref()
+                        .and_then(|p| self.gui_state.structure(p))
+                        .cloned(),
+                    tz: tz.clone(),
+                    wake: Arc::clone(&wake),
+                };
+                apply_sniffed_profile(&mut self.tabs[i], &profiles, &lines, sctx);
             }
             if let Some(job) = job
                 && let Some(w) = &self.alerts
@@ -1032,16 +1191,8 @@ impl OxTailApp {
         match action {
             Action::Open => self.pick_files(),
             Action::CloseTab => self.close_tab(self.active),
-            Action::NextTab => {
-                if !self.tabs.is_empty() {
-                    self.select_tab((self.active + 1) % self.tabs.len());
-                }
-            }
-            Action::PrevTab => {
-                if !self.tabs.is_empty() {
-                    self.select_tab((self.active + self.tabs.len() - 1) % self.tabs.len());
-                }
-            }
+            Action::NextTab => self.cycle_tab(1),
+            Action::PrevTab => self.cycle_tab(-1),
             Action::ZoomIn => self.set_font_size(self.settings.font_size + 1.0),
             Action::ZoomOut => self.set_font_size(self.settings.font_size - 1.0),
             Action::ZoomReset => self.set_font_size(Settings::default().font_size),
@@ -1052,6 +1203,18 @@ impl OxTailApp {
                         ..GotoDialog::default()
                     });
                 }
+            }
+            Action::GotoTime => {
+                if self.active_view().is_some() {
+                    self.windows.goto_time = Some(GotoTimeDialog {
+                        focus: true,
+                        ..GotoTimeDialog::default()
+                    });
+                }
+            }
+            Action::FindInTabs => {
+                self.windows.cross.open = true;
+                self.windows.cross.focus = true;
             }
             Action::Escape => self.escape(),
             Action::ToggleWrap => {
@@ -1066,8 +1229,18 @@ impl OxTailApp {
         if self.windows.goto.take().is_some() {
             return;
         }
+        // Dropping the dialog cancels a running search.
+        if self.windows.goto_time.take().is_some() {
+            return;
+        }
         if self.rule_editor.open {
             self.rule_editor.open = false;
+            return;
+        }
+        if let Some(m) = self.tabs.get_mut(self.active).and_then(Tab::merged_mut)
+            && m.find.open
+        {
+            m.find.open = false;
             return;
         }
         if let Some(v) = self.active_view_mut() {
@@ -1082,6 +1255,25 @@ impl OxTailApp {
         }
     }
 
+    /// Sets the time zone used to read and show timestamps and schedules
+    /// saving the settings.
+    pub fn set_timezone(&mut self, tz: oxtail_config::TimezoneSetting) {
+        if self.settings.timezone != tz {
+            self.settings.timezone = tz;
+            self.mark_settings_dirty();
+        }
+    }
+
+    /// Sets the time gap separator threshold in seconds (`0` switches it off)
+    /// and schedules saving the settings.
+    pub fn set_gap_threshold(&mut self, secs: f64) {
+        let secs = if secs.is_finite() { secs.max(0.0) } else { 0.0 };
+        if (self.settings.time_gap_threshold_secs - secs).abs() > f64::EPSILON {
+            self.settings.time_gap_threshold_secs = secs;
+            self.mark_settings_dirty();
+        }
+    }
+
     /// Sets wrapping for the active tab and remembers it as the default.
     pub fn set_wrap(&mut self, wrap: bool) {
         if let Some(v) = self.active_view_mut() {
@@ -1093,6 +1285,14 @@ impl OxTailApp {
     }
 
     fn perform_on_view(&mut self, action: Action, ctx: &Context) {
+        if self
+            .tabs
+            .get(self.active)
+            .is_some_and(|t| t.merged().is_some())
+        {
+            self.perform_on_merged(action, ctx);
+            return;
+        }
         let now = Instant::now();
         let Some(view) = self.tabs.get_mut(self.active).and_then(Tab::view_mut) else {
             return;
@@ -1161,6 +1361,106 @@ impl OxTailApp {
         ctx.request_repaint();
     }
 
+    /// Whether the go-to-time dialog is open.
+    pub fn windows_open_goto_time(&self) -> bool {
+        self.windows.goto_time.is_some()
+    }
+
+    /// The go-to-time dialog's error message, if it shows one.
+    pub fn goto_time_error(&self) -> Option<&str> {
+        self.windows
+            .goto_time
+            .as_ref()
+            .and_then(|d| d.error.as_deref())
+    }
+
+    /// Starts "go to time" for the active tab with what the user typed. The
+    /// search runs on a worker; the result is applied by
+    /// [`OxTailApp::poll_goto_time`]. Returns an error message for input that
+    /// cannot be understood.
+    pub fn apply_goto_time(&mut self, input: &str) -> Result<(), String> {
+        let tz = crate::colspec::zone_of(&self.settings.timezone);
+        let target = parse_goto_time(input, &tz, oxtail_time::jiff::Timestamp::now())?;
+        let wake = self.waker();
+        let Some(tab) = self.tabs.get(self.active) else {
+            return Ok(());
+        };
+        let tab_id = tab.id;
+        let Some(view) = tab.view() else {
+            return Ok(());
+        };
+        let job = GotoJob::start(
+            Arc::clone(&view.doc),
+            Arc::clone(&view.st.time),
+            target,
+            wake,
+        );
+        if let Some(d) = self.windows.goto_time.as_mut() {
+            d.job = Some((tab_id, job));
+            d.error = None;
+        }
+        Ok(())
+    }
+
+    /// Applies the answer of a running go-to-time search. Never blocks.
+    pub(crate) fn poll_goto_time(&mut self, ctx: &Context) {
+        let Some(dlg) = self.windows.goto_time.as_mut() else {
+            return;
+        };
+        let Some((tab_id, job)) = dlg.job.as_ref() else {
+            return;
+        };
+        let tab_id = *tab_id;
+        let Some(msg) = job.try_recv() else {
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        };
+        dlg.job = None;
+        let mut close = false;
+        match msg {
+            GotoMsg::Found { line, ts } => {
+                let tz = crate::colspec::zone_of(&self.settings.timezone);
+                if let Some(view) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.id == tab_id)
+                    .and_then(Tab::view_mut)
+                {
+                    view.jump_to_line(line, true);
+                    let at = ts.map(|t| crate::structure::format_timestamp(t, &tz));
+                    view.toast(match at {
+                        Some(a) => format!("Line {} at {a}", line + 1),
+                        None => format!("Line {}", line + 1),
+                    });
+                }
+                close = true;
+            }
+            GotoMsg::PastEnd { last_line } => {
+                if let Some(view) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.id == tab_id)
+                    .and_then(Tab::view_mut)
+                {
+                    view.jump_to_line(last_line, true);
+                    view.toast("That time is after the last line; showing the end");
+                }
+                close = true;
+            }
+            GotoMsg::NoTimestamps => {
+                dlg.error = Some("No timestamps found in this file".into());
+            }
+            GotoMsg::Changed => {
+                dlg.error = Some("The file changed during the search; try again".into());
+            }
+            GotoMsg::Cancelled => {}
+        }
+        if close {
+            self.windows.goto_time = None;
+        }
+        ctx.request_repaint();
+    }
+
     /// Applies the "Go to line" input to the active tab. Returns an error
     /// message for input that cannot be understood.
     pub fn apply_goto(&mut self, input: &str) -> Result<(), String> {
@@ -1196,12 +1496,26 @@ impl OxTailApp {
     /// Uses `profile` (or the default rules) in the active tab.
     pub fn set_profile(&mut self, profile: Option<String>) {
         let profiles = Arc::clone(&self.profiles);
+        let tz = self.settings.timezone.clone();
+        let wake = self.waker();
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.forced_profile.clone_from(&profile);
             tab.customized = false;
             if let Some(v) = tab.view_mut() {
                 let p = profile.as_deref().and_then(|n| profiles.by_name(n));
                 v.hl.borrow_mut().set_profile(p);
+                // The new profile may define columns; a parser the user chose
+                // for this file stays.
+                let chosen = matches!(
+                    v.st.origin,
+                    Some(crate::structure::Origin::Chosen | crate::structure::Origin::Restored)
+                );
+                let saved = chosen.then(|| v.st.saved());
+                let profile_for_columns = p.or_else(|| profiles.by_name("Generic"));
+                v.begin_structure(
+                    crate::tab::structure_input(profile_for_columns, saved, tz),
+                    wake,
+                );
             }
         }
     }
@@ -1265,13 +1579,15 @@ impl OxTailApp {
 
     /// The session as it would be saved now.
     pub fn current_session(&self) -> Session {
-        build_session(
+        let mut s = build_session(
             &self.tabs,
             self.active,
             &self.session,
             self.window,
             self.settings.recent_files_limit.max(1),
-        )
+        );
+        s.layout = self.session_layout();
+        s
     }
 
     fn periodic(&mut self, ctx: &Context, now: Instant) {
@@ -1301,6 +1617,16 @@ impl OxTailApp {
             self.last_saved_session = Some(s.clone());
             self.send_persist(Job::Session(s));
         }
+        self.save_gui_state_if_changed();
+    }
+
+    fn save_gui_state_if_changed(&mut self) {
+        self.gui_state.panes = self.pane_state();
+        self.gui_state.merged = self.merged_defs();
+        if self.last_saved_gui_state.as_ref() != Some(&self.gui_state) {
+            self.last_saved_gui_state = Some(self.gui_state.clone());
+            self.send_persist(Job::GuiState(Box::new(self.gui_state.clone())));
+        }
     }
 
     /// Saves everything and stops the worker threads (called when the window
@@ -1308,6 +1634,7 @@ impl OxTailApp {
     pub fn shutdown(&mut self) {
         let s = self.current_session();
         self.send_persist(Job::Session(s));
+        self.save_gui_state_if_changed();
         if self.settings_dirty_at.take().is_some() {
             self.send_persist(Job::Settings(self.settings.clone()));
         }

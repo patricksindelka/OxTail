@@ -136,6 +136,6 @@ Skills in `.claude/skills/`: `verify` (full check suite) and `milestone`
 | M1 Core viewer | done (visual check on real displays pending) |
 | M2 Search and filter | done |
 | M3 Highlighting and profiles | done |
-| M4 Columns | engine done; GUI next |
-| M5 Time and multi-file | engine done; GUI next |
+| M4 Columns | done (sorting of filtered views not done; visual check on real displays pending) |
+| M5 Time and multi-file | done (visual check on real displays pending) |
 | M6 Polish and 1.0 | not started |

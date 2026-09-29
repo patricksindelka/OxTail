@@ -16,6 +16,7 @@ use oxtail_config::{
     DataDir, PathMapper, Profile, ProfileSet, Session, Settings, ThemeSet, write_atomic,
 };
 
+use crate::guistate::{GUI_STATE_FILE, GuiState};
 use crate::startup::HISTORY_FILE;
 
 /// Something to do on the persistence thread.
@@ -28,6 +29,8 @@ pub enum Job {
     Profile(Profile),
     /// Write the search history.
     History(Vec<String>),
+    /// Write `gui-state.json` (column choices, panes, merged tabs).
+    GuiState(Box<GuiState>),
     /// Reload `profiles/`.
     ReloadProfiles,
     /// Reload `themes/`.
@@ -161,6 +164,16 @@ fn run_job(dd: &DataDir, mapper: &PathMapper, job: Job) -> Option<PersistResult>
                 r.map(|p| p.display().to_string()),
             ))
         }
+        Job::GuiState(g) => {
+            let path = dd.root.as_ref()?.join(GUI_STATE_FILE);
+            let r = write_atomic(&path, &g.to_bytes())
+                .map(|()| path.clone())
+                .map_err(|e| e.to_string());
+            Some(PersistResult::Saved(
+                "GUI state",
+                r.map(|p| p.display().to_string()),
+            ))
+        }
         Job::ReloadProfiles => {
             let dir = dd.profiles_dir()?;
             let l = ProfileSet::load_dir(&dir);
@@ -249,6 +262,21 @@ mod tests {
             recv(&rx),
             PersistResult::Saved("search history", Ok(_))
         ));
+        let mut gs = GuiState::default();
+        gs.set_structure(
+            std::path::Path::new("/tmp/a.log"),
+            crate::guistate::SavedStructure {
+                table: true,
+                ..Default::default()
+            },
+        );
+        p.send(Job::GuiState(Box::new(gs.clone())));
+        assert!(matches!(
+            recv(&rx),
+            PersistResult::Saved("GUI state", Ok(_))
+        ));
+        let bytes = std::fs::read(tmp.path().join(GUI_STATE_FILE)).unwrap();
+        assert_eq!(GuiState::parse(&bytes).structures, gs.structures);
         p.send(Job::ReloadThemes);
         assert!(matches!(recv(&rx), PersistResult::Themes(..)));
 

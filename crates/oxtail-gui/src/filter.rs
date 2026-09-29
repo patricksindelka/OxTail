@@ -14,6 +14,15 @@
 //! ```
 //!
 //! Flags: `r` regex, `i` ignore case, `s` case sensitive, `w` whole word.
+//!
+//! A `?` right after the optional `-` marks a *column query* (the small typed
+//! language of `oxtail-columns`, e.g. `?level:ERROR status>=500`); its text
+//! runs to the end of the string:
+//!
+//! ```text
+//! ?level:(ERROR|FATAL)     include lines matching the query
+//! -?path:/health           exclude them
+//! ```
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,6 +35,7 @@ use oxtail_search::{
 };
 
 use crate::find::QueryProblem;
+use crate::qfilter::{QueryContext, QueryPredicate, compile_query};
 
 /// How long typing must pause before the filter job restarts.
 pub const EDIT_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -45,6 +55,8 @@ pub struct FilterEntry {
     pub include: bool,
     /// Disabled entries are ignored.
     pub enabled: bool,
+    /// The text is a column query (`oxtail-columns`), not a literal/regex.
+    pub query: bool,
 }
 
 impl Default for FilterEntry {
@@ -56,6 +68,7 @@ impl Default for FilterEntry {
             whole_word: false,
             include: true,
             enabled: true,
+            query: false,
         }
     }
 }
@@ -69,8 +82,18 @@ impl FilterEntry {
         }
     }
 
+    /// A column-query entry (`level:ERROR`).
+    pub fn column_query(text: impl Into<String>, include: bool) -> Self {
+        Self {
+            text: text.into(),
+            include,
+            query: true,
+            ..Self::default()
+        }
+    }
+
     /// The search query of this entry.
-    pub fn query(&self) -> Query {
+    pub fn search_query(&self) -> Query {
         Query {
             pattern: self.text.clone(),
             kind: if self.regex {
@@ -85,6 +108,10 @@ impl FilterEntry {
 
     /// Serialises to the query grammar (see the module docs).
     pub fn to_query_string(&self) -> String {
+        if self.query {
+            let sign = if self.include { "" } else { "-" };
+            return format!("{sign}?{}", self.text);
+        }
         let mut flags = String::new();
         if self.regex {
             flags.push('r');
@@ -99,7 +126,7 @@ impl FilterEntry {
         }
         let sign = if self.include { "" } else { "-" };
         let plain = flags.is_empty()
-            && !self.text.starts_with(['-', '/', '!'])
+            && !self.text.starts_with(['-', '/', '!', '?'])
             && self.text == self.text.trim();
         if plain {
             format!("{sign}{}", self.text)
@@ -116,6 +143,11 @@ impl FilterEntry {
         if let Some(r) = rest.strip_prefix('-').or_else(|| rest.strip_prefix('!')) {
             e.include = false;
             rest = r;
+        }
+        if let Some(q) = rest.strip_prefix('?') {
+            e.query = true;
+            e.text = q.to_string();
+            return e;
         }
         if let Some(inner) = rest.strip_prefix('/')
             && let Some(close) = inner.rfind('/')
@@ -198,6 +230,8 @@ pub struct FilterState {
     pub hold_until: Option<Instant>,
     /// Bumped whenever the job restarts.
     pub epoch: u64,
+    /// What column queries run against (the tab's parser and time parser).
+    columns: Option<Arc<QueryContext>>,
     active: Option<ActiveFilter>,
 }
 
@@ -222,12 +256,39 @@ impl Default for FilterState {
             focus_last: false,
             hold_until: None,
             epoch: 0,
+            columns: None,
             active: None,
         }
     }
 }
 
 impl FilterState {
+    /// Sets what column queries run against; the job restarts when a query
+    /// filter is in use.
+    pub fn set_columns(&mut self, ctx: Option<Arc<QueryContext>>) {
+        self.columns = ctx;
+    }
+
+    /// The parser context queries run against.
+    pub fn columns(&self) -> Option<&Arc<QueryContext>> {
+        self.columns.as_ref()
+    }
+
+    /// Problems of one query text (syntax errors, unknown columns), for the
+    /// panel; does not depend on the job.
+    pub fn check_query(&self, text: &str) -> Vec<QueryProblem> {
+        match compile_query(text, self.columns.as_ref().map(|c| c.parser.schema())) {
+            Ok(_) => Vec::new(),
+            Err(issues) => issues
+                .into_iter()
+                .map(|i| QueryProblem {
+                    message: i.message,
+                    span: i.span,
+                })
+                .collect(),
+        }
+    }
+
     /// Builds a stack from the enabled, compilable entries, plus the hide
     /// rules unless `show_hidden`. Returns the stack and per-entry problems.
     pub fn build_stack(
@@ -240,7 +301,32 @@ impl FilterState {
             if !e.enabled || e.text.is_empty() {
                 continue;
             }
-            match Matcher::compile(&e.query()) {
+            if e.query {
+                match compile_query(&e.text, self.columns.as_ref().map(|c| c.parser.schema())) {
+                    Ok(q) => {
+                        let p: Arc<dyn LinePredicate> =
+                            Arc::new(QueryPredicate::new(q, self.columns.clone()));
+                        stack = stack.with(if e.include {
+                            Filter::include(p)
+                        } else {
+                            Filter::exclude(p)
+                        });
+                    }
+                    Err(issues) => {
+                        if let Some(first) = issues.into_iter().next() {
+                            problems.push((
+                                i,
+                                QueryProblem {
+                                    message: first.message,
+                                    span: first.span,
+                                },
+                            ));
+                        }
+                    }
+                }
+                continue;
+            }
+            match Matcher::compile(&e.search_query()) {
                 Ok(m) => {
                     let p: Arc<dyn LinePredicate> = Arc::new(m);
                     stack = stack.with(if e.include {
@@ -290,6 +376,19 @@ impl FilterState {
         {
             s.push_str(&e.to_query_string());
             s.push('\u{1}');
+        }
+        // Column queries depend on the parser (and the time zone).
+        if self
+            .entries
+            .iter()
+            .any(|e| e.enabled && e.query && !e.text.is_empty())
+        {
+            s.push_str(
+                &self
+                    .columns
+                    .as_ref()
+                    .map_or(String::new(), |c| c.signature()),
+            );
         }
         s
     }
@@ -660,18 +759,25 @@ mod tests {
                 0u8..3,
                 any::<bool>(),
                 any::<bool>(),
+                any::<bool>(),
             )
-                .prop_map(|(text, regex, case, whole_word, include)| FilterEntry {
-                    text,
-                    regex,
-                    case: match case {
-                        0 => CaseMode::Smart,
-                        1 => CaseMode::Sensitive,
-                        _ => CaseMode::Insensitive,
-                    },
-                    whole_word,
-                    include,
-                    enabled: true,
+                .prop_map(|(text, regex, case, whole_word, include, query)| {
+                    if query {
+                        return FilterEntry::column_query(text, include);
+                    }
+                    FilterEntry {
+                        text,
+                        regex,
+                        case: match case {
+                            0 => CaseMode::Smart,
+                            1 => CaseMode::Sensitive,
+                            _ => CaseMode::Insensitive,
+                        },
+                        whole_word,
+                        include,
+                        enabled: true,
+                        query: false,
+                    }
                 })
         }
 

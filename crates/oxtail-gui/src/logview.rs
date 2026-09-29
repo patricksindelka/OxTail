@@ -18,13 +18,17 @@ use egui::{
 use oxtail_core::Line;
 use oxtail_highlight::{ColorRef, Style, StyledSpan};
 use oxtail_search::{MatchSet, Matcher};
+use oxtail_time::jiff::Timestamp;
 
 use crate::colors::{Colors, mix32};
 use crate::docview::DocView;
 use crate::highlight::{HighlightState, Prepared};
 use crate::minimap::{bin_matches, bin_of, bin_points, click_fraction, intensity};
 use crate::scroll::{Row, Visible};
+use crate::table::{CellKey, HEADER_EXTRA, HeaderGeometry, draw_header};
+use crate::tablepaint::{TableRow, paint_table_row};
 use crate::text::{JobOptions, build_job, clean_ranges, compose};
+use crate::timeview::{REL_CHARS, RelMode, format_gap, gap_between, relative_label};
 use crate::viewport::{TrackClick, classify_click, digits, position_at, thumb_px};
 
 /// Width of the vertical scrollbar.
@@ -52,6 +56,9 @@ pub struct ViewEnv<'a> {
     pub minimap: bool,
     /// Changes whenever theme or font changed (invalidates laid-out lines).
     pub style_epoch: u64,
+    /// Show a separator between rows further apart than this many seconds
+    /// (`0` disables).
+    pub gap_secs: f64,
 }
 
 // ------------------------------------------------------------------ galleys
@@ -294,10 +301,14 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     let row_h = round_to_pixel(env.font_size * env.line_height, ppp);
     let char_w = ctx.fonts_mut(|f| f.glyph_width(&font, '0')).max(1.0);
 
-    let full = ui.available_rect_before_wrap();
-    ui.allocate_rect(full, Sense::hover());
-    let painter = ui.painter_at(full);
-    painter.rect_filled(full, CornerRadius::ZERO, colors.background);
+    // In table mode the header sits above the body; `full` is the body.
+    let table = view.table_active();
+    let header_h = if table { row_h + HEADER_EXTRA } else { 0.0 };
+    let outer = ui.available_rect_before_wrap();
+    ui.allocate_rect(outer, Sense::hover());
+    let painter = ui.painter_at(outer);
+    painter.rect_filled(outer, CornerRadius::ZERO, colors.background);
+    let full = Rect::from_min_max(pos2(outer.left(), outer.top() + header_h), outer.max);
 
     // ---- geometry
     let snapshot = Arc::clone(&view.snapshot);
@@ -306,7 +317,13 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         max_number = max_number.max(l.number + 1);
     }
     let number_cols = digits(max_number) + usize::from(!snapshot.lines.exact);
+    let rel_w = if view.rel_mode == RelMode::Off {
+        0.0
+    } else {
+        (REL_CHARS as f32 + 1.0) * char_w
+    };
     let gutter_w = MARKER_W
+        + rel_w
         + if env.line_numbers {
             number_cols as f32 * char_w + PAD * 2.0
         } else {
@@ -316,7 +333,10 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     let text_left = full.left() + gutter_w;
     let text_right = (full.right() - right_w).max(text_left + 20.0);
     let text_w = text_right - text_left;
-    let need_hbar = !view.wrap && view.max_text_w + PAD * 2.0 > text_w;
+    if table {
+        view.max_text_w = view.st.layout.total_width(char_w);
+    }
+    let need_hbar = (!view.wrap || table) && view.max_text_w + PAD * 2.0 > text_w;
     let bottom = full.bottom() - if need_hbar { HBAR_H } else { 0.0 };
     let text_rect = rect_between(pos2(text_left, full.top()), pos2(text_right, bottom));
     let gutter_rect = rect_between(pos2(full.left(), full.top()), pos2(text_left, bottom));
@@ -353,7 +373,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     }
 
     // ---- rows
-    let wrap_w = view.wrap.then(|| (text_w - PAD * 2.0).max(char_w * 8.0));
+    let wrap_w = (view.wrap && !table).then(|| (text_w - PAD * 2.0).max(char_w * 8.0));
     let hl = Rc::clone(&view.hl);
     let galleys = Rc::clone(&view.galleys);
     galleys.borrow_mut().begin_frame();
@@ -367,6 +387,8 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         .style_epoch
         .wrapping_mul(1_000_003)
         .wrapping_add(hl.borrow().epoch)
+        .wrapping_mul(1_000_003)
+        .wrapping_add(view.st.epoch)
         .wrapping_mul(1_000_003)
         .wrapping_add(view.find.epoch)
         .wrapping_mul(2)
@@ -399,25 +421,51 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
 
     // Horizontal scroll range.
     let mut widest = view.max_text_w;
-    let mut laid: Vec<(Arc<Prepared>, Arc<Galley>)> = Vec::with_capacity(vis.rows.len());
+    let mut laid: Vec<(Arc<Prepared>, Option<Arc<Galley>>)> = Vec::with_capacity(vis.rows.len());
     for r in &vis.rows {
-        let (p, g) = layout_line(&ctx, &hl, &galleys, &lopts, &r.line);
-        widest = widest.max(g.size().x);
-        laid.push((p, g));
+        if table {
+            laid.push((hl.borrow_mut().prepare(&r.line), None));
+        } else {
+            let (p, g) = layout_line(&ctx, &hl, &galleys, &lopts, &r.line);
+            widest = widest.max(g.size().x);
+            laid.push((p, Some(g)));
+        }
     }
-    view.max_text_w = widest;
+    if !table {
+        view.max_text_w = widest;
+    }
     let max_h = (view.max_text_w + PAD * 2.0 - text_w).max(0.0);
-    view.h_scroll = if view.wrap {
+    view.h_scroll = if view.wrap && !table {
         0.0
     } else {
         view.h_scroll.clamp(0.0, max_h)
     };
+    // Table geometry.
+    let placements = if table {
+        view.st.layout.placements(text_w, char_w)
+    } else {
+        Vec::new()
+    };
+    let pinned_w: f32 = placements.iter().filter(|p| p.pinned).map(|p| p.w).sum();
+    let mut tcache = std::mem::take(&mut view.tcache);
+    tcache.begin_frame();
 
     // ---- paint rows
     let text_painter = painter.with_clip_rect(text_rect);
     let gutter_painter = painter.with_clip_rect(gutter_rect);
     painter.rect_filled(gutter_rect, CornerRadius::ZERO, colors.gutter_bg);
     let mut prev_offset: Option<u64> = None;
+    let time_on = view.rel_mode != RelMode::Off || env.gap_secs > 0.0;
+    let mut prev_ts: Option<Timestamp> = if time_on {
+        vis.rows.first().and_then(|r| view.time_before(&r.line))
+    } else {
+        None
+    };
+    let selected_ts = if view.rel_mode == RelMode::Selected {
+        view.selected_time()
+    } else {
+        None
+    };
     let selection = view.selection;
     let cursor = view.cursor;
     let mut bookmark_updates: Vec<(u64, u64)> = Vec::new();
@@ -447,6 +495,16 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
             );
         }
         prev_offset = Some(row.line.offset);
+        let ts = if time_on {
+            view.row_time(&row.line)
+        } else {
+            None
+        };
+        let gap = gap_between(prev_ts, ts, env.gap_secs);
+        let rel = relative_label(view.rel_mode, ts, prev_ts, selected_ts);
+        if ts.is_some() {
+            prev_ts = ts;
+        }
 
         let selected = selection.is_some_and(|s| s.contains(row.line.offset));
         if selected {
@@ -471,11 +529,42 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
             );
         }
         // Text.
-        text_painter.galley(
-            pos2(text_rect.left() + PAD - view.h_scroll, y),
-            Arc::clone(galley),
-            colors.text,
-        );
+        if let Some(galley) = galley {
+            text_painter.galley(
+                pos2(text_rect.left() + PAD - view.h_scroll, y),
+                Arc::clone(galley),
+                colors.text,
+            );
+        } else {
+            let dimmed = set.as_deref().is_some_and(|s| {
+                s.is_context(s.rank(row.line.offset)) && s.contains(row.line.offset)
+            });
+            let key = CellKey {
+                epoch,
+                current: current == Some(row.line.offset),
+                dimmed,
+            };
+            paint_table_row(
+                &TableRow {
+                    ctx: &ctx,
+                    view: &*view,
+                    colors,
+                    font: &font,
+                    row_h,
+                    char_w,
+                    y,
+                    text_rect,
+                    placements: &placements,
+                    pinned_w,
+                    prepared,
+                    line: &row.line,
+                    key,
+                    matcher: matcher.as_ref(),
+                },
+                &mut tcache,
+                &painter,
+            );
+        }
         // Gutter: bookmark, rule marker, number.
         let marker_c = pos2(gutter_row.left() + MARKER_W * 0.5, y + row_h * 0.5);
         if row.line.number_exact && view.bookmarks.contains_key(&row.line.number) {
@@ -496,12 +585,37 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                 format!("\u{2248}{}", row.line.number + 1)
             };
             gutter_painter.text(
-                pos2(gutter_rect.right() - PAD, y),
+                pos2(gutter_rect.right() - PAD - rel_w, y),
                 Align2::RIGHT_TOP,
                 label,
                 font.clone(),
                 colors.gutter_text,
             );
+        }
+        if let Some(rel) = rel {
+            gutter_painter.text(
+                pos2(gutter_rect.right() - PAD, y),
+                Align2::RIGHT_TOP,
+                rel,
+                font.clone(),
+                mix32(colors.gutter_text, colors.accent, 0.35),
+            );
+        }
+        if let Some(g) = gap {
+            // Like the mark separator, with the size of the gap.
+            let warn = colors.resolve(&ColorRef::solid(oxtail_highlight::SemanticColor::Warn));
+            let ly = y.round();
+            painter.hline(full.left()..=text_rect.right(), ly, Stroke::new(1.5, warn));
+            let label = format!("gap {}", format_gap(g));
+            let galley = ctx.fonts_mut(|f| {
+                f.layout_no_wrap(label, FontId::proportional(env.font_size * 0.85), warn)
+            });
+            let pill = Rect::from_min_size(
+                pos2(text_rect.right() - galley.size().x - PAD * 2.0 - 2.0, ly),
+                galley.size() + vec2(PAD * 2.0, 2.0),
+            );
+            painter.rect_filled(pill, CornerRadius::same(3), colors.background);
+            painter.galley(pos2(pill.left() + PAD, pill.top() + 1.0), galley, warn);
         }
     }
     if let Some(prev) = prev_offset
@@ -518,6 +632,73 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     }
     for (n, o) in bookmark_updates {
         view.learn_bookmark_offset(n, o);
+    }
+    view.tcache = tcache;
+    if table {
+        // Column separators.
+        let sep = mix32(colors.background, colors.border, 0.6);
+        let body = painter.with_clip_rect(text_rect);
+        for p in &placements {
+            let x = text_left + p.x + p.w - if p.pinned { 0.0 } else { view.h_scroll };
+            let min_x = if p.pinned {
+                text_left
+            } else {
+                text_left + pinned_w
+            };
+            if x >= min_x && x <= text_right {
+                body.vline(x - 0.5, text_rect.y_range(), Stroke::new(1.0, sep));
+            }
+        }
+        // Header.
+        if let Some(parser) = view.st.parser.clone() {
+            let geo = HeaderGeometry {
+                rect: Rect::from_min_max(
+                    pos2(outer.left(), outer.top()),
+                    pos2(text_right, full.top()),
+                ),
+                text_left,
+                text_right,
+                h_scroll: view.h_scroll,
+                pinned_w,
+                char_w,
+                placements: &placements,
+            };
+            let events = draw_header(
+                ui,
+                id.with("header"),
+                &geo,
+                parser.schema(),
+                &view.st.layout,
+                colors,
+                &font,
+            );
+            if !events.is_empty() {
+                let mut fits = HashMap::new();
+                for ev in &events {
+                    if let crate::table::HeaderEvent::Autofit(pos) = ev {
+                        fits.insert(*pos, view.widest_cell(*pos));
+                    }
+                }
+                let widest = |pos: usize| fits.get(&pos).copied().unwrap_or(0);
+                if crate::table::apply_events(
+                    &mut view.st.layout,
+                    parser.schema(),
+                    &events,
+                    &widest,
+                ) {
+                    view.st.dirty = true;
+                }
+            }
+            // The corner above the scrollbar and minimap.
+            painter.rect_filled(
+                Rect::from_min_max(
+                    pos2(text_right, outer.top()),
+                    pos2(outer.right(), full.top()),
+                ),
+                CornerRadius::ZERO,
+                colors.gutter_bg,
+            );
+        }
     }
     // Gutter / text separator.
     painter.vline(
@@ -738,6 +919,35 @@ fn handle_pointer(
         if ui.button("Select all").clicked() {
             view.select_all();
             ui.close();
+        }
+        if let Some(parser) = view.st.parser.clone() {
+            ui.separator();
+            let rec = view.selected_record().and_then(|(_, p)| p.record.clone());
+            if ui
+                .add_enabled(rec.is_some(), egui::Button::new("Copy record as JSON"))
+                .clicked()
+                && let Some(r) = &rec
+            {
+                ui.ctx()
+                    .copy_text(crate::detail::record_json(parser.schema(), r));
+                ui.close();
+            }
+            if ui
+                .add_enabled(rec.is_some(), egui::Button::new("Copy record as CSV"))
+                .clicked()
+                && let Some(r) = &rec
+            {
+                ui.ctx()
+                    .copy_text(crate::detail::record_csv(parser.schema(), r));
+                ui.close();
+            }
+            if ui
+                .checkbox(&mut view.detail_open, "Detail pane")
+                .on_hover_text("Show the selected record as key/value pairs")
+                .clicked()
+            {
+                ui.close();
+            }
         }
         ui.separator();
         if ui

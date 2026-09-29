@@ -14,10 +14,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use oxtail_config::TimezoneSetting;
 use oxtail_core::{
     DocEvent, DocSnapshot, DocState, Document, EncodingChoice, Line, LineRequest, RequestId,
 };
 use oxtail_search::MatchSet;
+use oxtail_time::jiff::Timestamp;
 
 use crate::filter::FilterState;
 use crate::find::{Dir, FindEvent, FindState};
@@ -26,6 +28,9 @@ use crate::linecache::{DEFAULT_CAPACITY, LineCache};
 use crate::scroll::{
     Fetch, OVERSCAN_ROWS, Pos, RowSpace, Visible, layout_rows, plan_fetch, scroll_by, tail_position,
 };
+use crate::structure::{Structure, StructureInput, StructureResult};
+use crate::table::TableCache;
+use crate::timeview::{RelMode, TimeCache};
 use crate::viewport::{ScrollSpace, bytes_target, lines_target};
 
 /// How long a read may stay outstanding before it is asked for again.
@@ -265,6 +270,28 @@ pub struct DocView {
     pub last_rows: Vec<Arc<Line>>,
     /// The scrollbar thumb is being dragged at this position.
     pub thumb_drag: Option<f64>,
+    /// Column structure: parser, table view, layout, time parser.
+    pub st: Structure,
+    /// Laid-out table cells.
+    pub tcache: TableCache,
+    /// The time zone setting the structure was built with.
+    pub tz_setting: TimezoneSetting,
+    /// The detail pane (selected record as key/value list) is open.
+    pub detail_open: bool,
+    /// Column statistics.
+    pub stats: crate::stats::StatsState,
+    /// The export dialog.
+    pub export: crate::export::ExportState,
+    /// The parser chooser window.
+    pub chooser: crate::chooser::ChooserState,
+    /// The first lines of the file (read for profile selection).
+    pub sample: Vec<String>,
+    /// Wakes the event loop from worker threads.
+    pub wake: Arc<dyn Fn() + Send + Sync>,
+    /// What the relative-time gutter column shows.
+    pub rel_mode: RelMode,
+    /// Parsed timestamps of lines (by start offset).
+    time_cache: RefCell<TimeCache>,
     pending: HashMap<RequestId, Pending>,
     back_attempts: HashMap<u64, u32>,
     pending_px: f32,
@@ -319,6 +346,17 @@ impl DocView {
             },
             last_rows: Vec::new(),
             thumb_drag: None,
+            st: Structure::new(),
+            tcache: TableCache::default(),
+            tz_setting: TimezoneSetting::default(),
+            detail_open: false,
+            stats: crate::stats::StatsState::default(),
+            export: crate::export::ExportState::default(),
+            chooser: crate::chooser::ChooserState::default(),
+            sample: Vec::new(),
+            wake: Arc::new(|| {}),
+            rel_mode: RelMode::Off,
+            time_cache: RefCell::new(TimeCache::default()),
             pending: HashMap::new(),
             back_attempts: HashMap::new(),
             pending_px: 0.0,
@@ -336,6 +374,240 @@ impl DocView {
             was_exact: false,
             alert_next: None,
         }
+    }
+
+    // ------------------------------------------------------------- structure
+
+    /// Starts deciding the column structure on a worker thread (see
+    /// [`crate::structure`]). `wake` requests a repaint when it is done.
+    pub fn begin_structure(&mut self, input: StructureInput, wake: Arc<dyn Fn() + Send + Sync>) {
+        if let Some(tz) = &input.tz {
+            self.tz_setting = tz.clone();
+        }
+        self.st.begin(&self.doc, input, wake);
+    }
+
+    fn apply_structure(&mut self, res: StructureResult) {
+        let tz = self.tz_setting.clone();
+        let parser = self.st.apply(res, &tz);
+        self.structure_changed(parser);
+    }
+
+    /// Pushes a changed parser into everything that depends on it and
+    /// invalidates what was painted with the old one.
+    pub fn structure_changed(&mut self, parser: Option<Arc<oxtail_columns::Parser>>) {
+        self.hl.borrow_mut().set_parser(parser);
+        self.galleys.borrow_mut().clear();
+        self.tcache.clear();
+        self.time_cache.borrow_mut().clear();
+        self.max_text_w = 0.0;
+        self.filter.set_columns(self.st.query_context());
+    }
+
+    /// Accepts the pending structure suggestion (parser plus table view).
+    pub fn accept_suggestion(&mut self) {
+        let parser = self.st.accept_suggestion();
+        self.structure_changed(parser);
+    }
+
+    /// Dismisses the pending structure suggestion.
+    pub fn dismiss_suggestion(&mut self) {
+        self.st.dismiss_suggestion();
+    }
+
+    /// Uses a parser chosen by the user. Returns an error message when it
+    /// does not compile.
+    pub fn choose_parser(&mut self, spec: oxtail_columns::ParserSpec) -> Result<(), String> {
+        let parser = self.st.choose(spec)?;
+        self.structure_changed(Some(parser));
+        Ok(())
+    }
+
+    /// Back to plain text.
+    pub fn clear_parser(&mut self) {
+        self.st.clear();
+        self.structure_changed(None);
+    }
+
+    /// Shows or hides the table view.
+    pub fn set_table(&mut self, on: bool) {
+        self.st.set_table(on);
+        self.tcache.clear();
+        self.max_text_w = 0.0;
+        self.h_scroll = 0.0;
+    }
+
+    /// Whether the table view is showing.
+    pub fn table_active(&self) -> bool {
+        self.st.table && self.st.parser.is_some()
+    }
+
+    /// Changes the time zone of the tab (timestamps are re-rendered).
+    pub fn set_time_zone(&mut self, tz: &TimezoneSetting) {
+        if &self.tz_setting != tz {
+            self.tz_setting = tz.clone();
+            self.st.set_zone(tz);
+            self.tcache.clear();
+            self.time_cache.borrow_mut().clear();
+            self.galleys.borrow_mut().clear();
+            self.filter.set_columns(self.st.query_context());
+        }
+    }
+
+    /// The timestamp of a line: the timestamp column of its record, else the
+    /// first timestamp in its text (cached).
+    pub fn row_time(&self, line: &Line) -> Option<Timestamp> {
+        if let Some(v) = self.time_cache.borrow().get(line.offset) {
+            return v;
+        }
+        let p = self.hl.borrow_mut().prepare(line);
+        let ts = self.st.record_time(p.record.as_ref(), &p.text);
+        self.time_cache.borrow_mut().put(line.offset, ts);
+        ts
+    }
+
+    /// The timestamp of the nearest cached line before `line` that has one
+    /// (looking at most a few lines back), for the relative-time column and
+    /// gap detection of the first visible row.
+    pub fn time_before(&self, line: &Line) -> Option<Timestamp> {
+        let set = self.active_set();
+        let mut at = line.offset;
+        for _ in 0..8 {
+            let prev_off = match &set {
+                Some(s) => s.prev_before(at)?,
+                None => self.cache.prev(at)?.offset,
+            };
+            let prev = self.cache.get(prev_off)?;
+            if let Some(t) = self.row_time(prev) {
+                return Some(t);
+            }
+            at = prev_off;
+        }
+        None
+    }
+
+    /// The timestamp of the selected (cursor) line.
+    pub fn selected_time(&self) -> Option<Timestamp> {
+        let off = self.selection.map(|s| s.cursor.offset).or(self.cursor)?;
+        let line = self.cache.get(off)?;
+        self.row_time(line)
+    }
+
+    /// Starts the column statistics worker for the current scope.
+    pub fn start_stats(&mut self) {
+        let Some(parser) = self.st.parser.clone() else {
+            self.toast("This file has no columns to summarise");
+            return;
+        };
+        let filter = (self.stats.scope == crate::stats::StatsScope::Filter && self.is_filtered())
+            .then(|| self.active_set())
+            .flatten();
+        let doc = Arc::clone(&self.doc);
+        let wake = Arc::clone(&self.wake);
+        self.stats.start(&doc, &parser, filter, wake);
+    }
+
+    /// Opens the save dialog for an export (on a worker thread).
+    pub fn choose_export_path(&mut self, suggested: &str) {
+        if self.export.choosing {
+            return;
+        }
+        self.export.choosing = true;
+        self.export.result = None;
+        self.export.chosen = Some(crate::export::pick_save_path(
+            self.export.format,
+            suggested,
+            Arc::clone(&self.wake),
+        ));
+    }
+
+    /// Starts writing the export to `path` with the dialog's settings.
+    pub fn start_export(&mut self, path: std::path::PathBuf) {
+        let Some(parser) = self.st.parser.clone() else {
+            return;
+        };
+        self.export.sync_columns(parser.schema().len());
+        let order: Vec<usize> = self.st.layout.cols.iter().map(|c| c.col).collect();
+        let columns = self.export.columns(&order);
+        if columns.is_empty() {
+            self.export.result = Some(crate::export::ExportMsg::Failed(
+                "Select at least one column".into(),
+            ));
+            return;
+        }
+        let filter = (self.export.filtered_only && self.is_filtered())
+            .then(|| self.active_set())
+            .flatten();
+        self.export.progress = (0, 0);
+        self.export.result = None;
+        self.export.job = Some(crate::export::ExportJob::start(
+            Arc::clone(&self.doc),
+            parser,
+            crate::export::ExportSpec {
+                path,
+                format: self.export.format,
+                columns,
+                filter,
+            },
+            Arc::clone(&self.wake),
+        ));
+    }
+
+    /// Polls the statistics and export workers (and the save dialog).
+    /// Returns whether a repaint is wanted.
+    pub fn poll_tools(&mut self) -> bool {
+        let mut repaint = self.stats.poll();
+        repaint |= self.export.poll();
+        if let Some(rx) = &self.export.chosen {
+            match rx.try_recv() {
+                Ok(Some(path)) => {
+                    self.export.chosen = None;
+                    self.export.choosing = false;
+                    self.start_export(path);
+                    repaint = true;
+                }
+                Ok(None) | Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.export.chosen = None;
+                    self.export.choosing = false;
+                    repaint = true;
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+            }
+        }
+        repaint
+    }
+
+    /// Whether a tool worker runs and the UI should poll for its messages.
+    pub fn tools_busy(&self) -> bool {
+        self.stats.running() || self.export.job.is_some() || self.export.choosing
+    }
+
+    /// The widest visible cell of the column at display position `pos`, in
+    /// characters (for auto-fit).
+    pub fn widest_cell(&self, pos: usize) -> usize {
+        let Some(col) = self.st.layout.cols.get(pos).map(|c| c.col) else {
+            return 0;
+        };
+        let mut hl = self.hl.borrow_mut();
+        self.last_rows
+            .iter()
+            .filter_map(|l| {
+                let p = hl.prepare(l);
+                p.record
+                    .as_ref()
+                    .map(|r| self.st.cell_text(col, r).chars().count())
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The parsed record of the selected line (the cursor line), for the
+    /// detail pane, with its line text.
+    pub fn selected_record(&self) -> Option<(Arc<Line>, Arc<crate::highlight::Prepared>)> {
+        let off = self.selection.map(|s| s.cursor.offset).or(self.cursor)?;
+        let line = self.cache.get(off)?.clone();
+        let prepared = self.hl.borrow_mut().prepare(&line);
+        Some((line, prepared))
     }
 
     // ----------------------------------------------------------------- state
@@ -371,6 +643,12 @@ impl DocView {
             .unwrap_or(self.pos.top)
     }
 
+    /// The line the user last selected or jumped to, if any (unlike
+    /// [`DocView::cursor_offset`] it does not fall back to the top row).
+    pub fn user_cursor(&self) -> Option<u64> {
+        self.selection.map(|s| s.cursor.offset).or(self.cursor)
+    }
+
     fn view_rows(&self) -> usize {
         self.metrics.view_rows()
     }
@@ -404,6 +682,10 @@ impl DocView {
         let mut out = PumpOutput::default();
         self.snapshot = self.doc.snapshot();
         self.sync_generation();
+        if let Some(res) = self.st.poll() {
+            self.apply_structure(res);
+            out.repaint = true;
+        }
 
         while let Ok(ev) = self.doc.events().try_recv() {
             out.repaint = true;
@@ -453,6 +735,8 @@ impl DocView {
         self.thumb_drag = None;
         self.hl.borrow_mut().clear_cache();
         self.galleys.borrow_mut().clear();
+        self.tcache.clear();
+        self.time_cache.borrow_mut().clear();
         self.max_text_w = 0.0;
         self.alert_next = None;
         self.was_exact = false;
@@ -548,6 +832,7 @@ impl DocView {
             }
             Some(ReqKind::Sniff) => {
                 self.sniffed = Some(lines.iter().map(|l| l.text.clone()).collect());
+                self.sample = lines.iter().map(|l| l.text.clone()).collect();
                 self.insert_lines(generation, lines);
             }
             Some(ReqKind::Tail) => {

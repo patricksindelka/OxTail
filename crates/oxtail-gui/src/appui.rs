@@ -3,15 +3,17 @@
 
 use std::time::Instant;
 
-use egui::{Align2, Context, CornerRadius, Id, RichText, Sense, Ui, ViewportCommand, vec2};
-use oxtail_config::ThemeChoice;
+use egui::{Align2, Context, CornerRadius, Id, RichText, Ui, ViewportCommand};
+use oxtail_config::{ThemeChoice, TimezoneSetting};
 
 use crate::app::{OxTailApp, Windows};
+use crate::colui::{self, SuggestionAction};
 use crate::keymap::Action;
 use crate::logview::{self, ViewEnv};
 use crate::panels::{self, StatusAction};
 use crate::request::OpenRequest;
-use crate::tab::{TabContent, drop_index, move_item};
+use crate::tab::{Tab, TabContent};
+use crate::timeview::{DEFAULT_GAP_SECS, RelMode};
 
 impl OxTailApp {
     /// Draws one frame into `ui`.
@@ -22,9 +24,13 @@ impl OxTailApp {
         self.update_title(&ctx);
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui, &ctx));
-        egui::Panel::top("tabs").show(ui, |ui| self.tabs_bar(ui));
+        if self.pane_count() <= 1 {
+            let pane = self.panes.panes().first().copied().unwrap_or(0);
+            egui::Panel::top("tabs").show(ui, |ui| self.tabs_strip(ui, pane));
+        }
         self.notices_ui(ui);
         self.body(ui);
+        self.drop_overlay_for_tabs(&ctx);
         self.windows_ui(&ctx);
         drop_overlay(&ctx);
     }
@@ -139,6 +145,23 @@ impl OxTailApp {
                         self.perform(Action::GotoLine, ctx);
                         ui.close();
                     }
+                    if ui
+                        .add(egui::Button::new("Go to time\u{2026}").shortcut_text("Ctrl+Shift+G"))
+                        .clicked()
+                    {
+                        self.perform(Action::GotoTime, ctx);
+                        ui.close();
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new("Search in all tabs\u{2026}")
+                                .shortcut_text("Ctrl+Alt+F"),
+                        )
+                        .clicked()
+                    {
+                        self.perform(Action::FindInTabs, ctx);
+                        ui.close();
+                    }
                     ui.separator();
                     ui.menu_button("Bookmarks", |ui| {
                         if ui
@@ -221,6 +244,10 @@ impl OxTailApp {
                     self.settings.line_numbers = ln;
                     self.mark_settings_dirty();
                 }
+                self.columns_menu(ui);
+                self.time_menu(ui);
+                ui.separator();
+                self.layout_menu(ui);
                 ui.separator();
                 if ui
                     .add(egui::Button::new("Zoom in").shortcut_text("Ctrl+="))
@@ -262,139 +289,80 @@ impl OxTailApp {
         });
     }
 
-    // -------------------------------------------------------------- tab bar
-
-    fn tabs_bar(&mut self, ui: &mut Ui) {
-        let colors = self.colors.clone();
-        let mut select: Option<usize> = None;
-        let mut close: Option<usize> = None;
-        let mut reorder: Option<(usize, f32)> = None;
-        let mut centers: Vec<f32> = Vec::new();
-        egui::ScrollArea::horizontal()
-            .id_salt("tab-scroll")
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    for (i, tab) in self.tabs.iter().enumerate() {
-                        let selected = i == self.active;
-                        let label = tab.label();
-                        let font = egui::FontId::proportional(13.0);
-                        let galley = ui.painter().layout_no_wrap(
-                            label,
-                            font,
-                            if selected {
-                                colors.text
-                            } else {
-                                colors.status_text
-                            },
-                        );
-                        let close_w = 18.0;
-                        let size = vec2(galley.size().x + 22.0 + close_w, 26.0);
-                        let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
-                        centers.push(rect.center().x);
-                        let bg = if selected {
-                            colors.background
-                        } else if resp.hovered() {
-                            colors.current_line_bg
-                        } else {
-                            colors.gutter_bg
-                        };
-                        ui.painter().rect_filled(
-                            rect,
-                            CornerRadius {
-                                nw: 4,
-                                ne: 4,
-                                sw: 0,
-                                se: 0,
-                            },
-                            bg,
-                        );
-                        if selected {
-                            ui.painter().hline(
-                                rect.x_range(),
-                                rect.top() + 1.0,
-                                egui::Stroke::new(2.0, colors.accent),
-                            );
-                        }
-                        let text_pos =
-                            egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y * 0.5);
-                        ui.painter().galley(text_pos, galley, colors.text);
-                        // Close button: an x drawn with two lines.
-                        let close_rect = egui::Rect::from_center_size(
-                            egui::pos2(rect.right() - close_w * 0.5 - 4.0, rect.center().y),
-                            vec2(16.0, 16.0),
-                        );
-                        let close_resp =
-                            ui.interact(close_rect, Id::new(("tab-close", tab.id)), Sense::click());
-                        let c = if close_resp.hovered() {
-                            colors.text
-                        } else {
-                            colors.gutter_text
-                        };
-                        if close_resp.hovered() {
-                            ui.painter().rect_filled(
-                                close_rect,
-                                CornerRadius::same(3),
-                                colors.selection_bg,
-                            );
-                        }
-                        let m = 4.5;
-                        let ctr = close_rect.center();
-                        let stroke = egui::Stroke::new(1.3, c);
-                        ui.painter()
-                            .line_segment([ctr + vec2(-m, -m), ctr + vec2(m, m)], stroke);
-                        ui.painter()
-                            .line_segment([ctr + vec2(-m, m), ctr + vec2(m, -m)], stroke);
-                        if close_resp.clicked() || resp.middle_clicked() {
-                            close = Some(i);
-                        } else if resp.clicked() {
-                            select = Some(i);
-                        }
-                        if resp.drag_started() {
-                            select = Some(i);
-                        }
-                        if resp.drag_stopped()
-                            && let Some(p) = ui.input(|i| i.pointer.interact_pos())
-                        {
-                            reorder = Some((i, p.x));
-                        }
-                        let resp = match &tab.path {
-                            Some(p) => resp.on_hover_text(p.display().to_string()),
-                            None => resp,
-                        };
-                        let _ = resp;
-                    }
+    /// The "Columns" submenu of the View menu.
+    fn columns_menu(&mut self, ui: &mut Ui) {
+        let Some(view) = self.active_view_mut() else {
+            return;
+        };
+        ui.menu_button("Columns", |ui| {
+            let has_parser = view.st.parser.is_some();
+            let mut table = view.table_active();
+            if ui
+                .add_enabled(
+                    has_parser,
+                    egui::Checkbox::new(&mut table, "Show as columns"),
+                )
+                .changed()
+            {
+                view.set_table(table);
+            }
+            if ui.button("Choose parser\u{2026}").clicked() {
+                view.chooser.open = true;
+                ui.close();
+            }
+            let mut detail = view.detail_open;
+            if ui
+                .add_enabled(has_parser, egui::Checkbox::new(&mut detail, "Detail pane"))
+                .changed()
+            {
+                view.detail_open = detail;
+            }
+            ui.separator();
+            ui.menu_button("Relative time", |ui| {
+                for mode in [RelMode::Off, RelMode::Previous, RelMode::Selected] {
                     if ui
-                        .add(egui::Button::new("+").frame(false))
-                        .on_hover_text("Open a file (Ctrl+O)")
+                        .radio_value(&mut view.rel_mode, mode, mode.label())
                         .clicked()
                     {
-                        self.file_dialog_requested = true;
+                        ui.close();
                     }
-                });
+                }
             });
-        if let Some(i) = select {
-            self.select_tab(i);
-        }
-        if let Some((from, x)) = reorder {
-            let to = drop_index(&centers, x);
-            let new_index = move_item(&mut self.tabs, from, to);
-            if self.active == from {
-                self.active = new_index;
-            } else if from < self.active && new_index >= self.active {
-                self.active -= 1;
-            } else if from > self.active && new_index <= self.active {
-                self.active += 1;
+            if ui
+                .add_enabled(has_parser, egui::Button::new("Statistics\u{2026}"))
+                .clicked()
+            {
+                view.stats.open = true;
+                ui.close();
             }
-        }
-        if let Some(i) = close {
-            self.close_tab(i);
-        }
-        if std::mem::take(&mut self.file_dialog_requested) {
-            self.pick_files();
+            if ui
+                .add_enabled(has_parser, egui::Button::new("Export\u{2026}"))
+                .clicked()
+            {
+                view.export.open = true;
+                ui.close();
+            }
+            if has_parser {
+                ui.separator();
+                ui.label(egui::RichText::new(format!("Format: {}", view.st.name)).weak());
+            }
+        });
+    }
+
+    /// The "Time" additions of the View menu: gap separators.
+    fn time_menu(&mut self, ui: &mut Ui) {
+        let mut on = self.settings.time_gap_threshold_secs > 0.0;
+        if ui
+            .checkbox(&mut on, "Show time gaps")
+            .on_hover_text("A separator between lines that are far apart in time")
+            .changed()
+        {
+            self.settings.time_gap_threshold_secs = if on { DEFAULT_GAP_SECS } else { 0.0 };
+            self.mark_settings_dirty();
         }
     }
+
+    // -------------------------------------------------------------- tab bar
 
     fn notices_ui(&mut self, ui: &mut Ui) {
         if self.notices.is_empty() {
@@ -428,20 +396,40 @@ impl OxTailApp {
     // ----------------------------------------------------------------- body
 
     fn body(&mut self, ui: &mut Ui) {
+        if self.tabs.is_empty() {
+            self.pane_rects.clear();
+            self.welcome(ui);
+            return;
+        }
+        let panes = self.panes.panes();
+        if panes.len() <= 1 {
+            let rect = ui.available_rect_before_wrap();
+            self.pane_rects = vec![(panes.first().copied().unwrap_or(0), rect)];
+            self.tab_body(ui, self.active);
+        } else {
+            self.body_panes(ui);
+        }
+    }
+
+    /// The content of tab `index`: opening message, error, log view or merged
+    /// view.
+    pub(crate) fn tab_body(&mut self, ui: &mut Ui, index: usize) {
         enum State {
             None,
             Opening,
             Failed(String),
             Ready,
+            Merged,
         }
-        let state = match self.tabs.get(self.active).map(|t| &t.content) {
+        let state = match self.tabs.get(index).map(|t| &t.content) {
             None => State::None,
             Some(TabContent::Opening(_)) => State::Opening,
             Some(TabContent::Failed(m)) => State::Failed(m.clone()),
             Some(TabContent::Ready(_)) => State::Ready,
+            Some(TabContent::Merged(_)) => State::Merged,
         };
         match state {
-            State::None => self.welcome(ui),
+            State::None => {}
             State::Opening => {
                 egui::CentralPanel::default().show(ui, |ui| {
                     ui.centered_and_justified(|ui| {
@@ -463,10 +451,11 @@ impl OxTailApp {
                     });
                 });
                 if close {
-                    self.close_tab(self.active);
+                    self.close_tab(index);
                 }
             }
-            State::Ready => self.tab_ui(ui),
+            State::Ready => self.tab_ui(ui, index),
+            State::Merged => self.merged_ui(ui, index),
         }
     }
 
@@ -504,14 +493,15 @@ impl OxTailApp {
         }
     }
 
-    fn tab_ui(&mut self, ui: &mut Ui) {
+    fn tab_ui(&mut self, ui: &mut Ui, index: usize) {
         let now = Instant::now();
         let mut status_action = StatusAction::None;
         let mut history_changed = false;
+        let mut suggestion = SuggestionAction::None;
+        let mut copy: Option<String> = None;
         {
             let Self {
                 tabs,
-                active,
                 colors,
                 settings,
                 profiles,
@@ -519,7 +509,7 @@ impl OxTailApp {
                 style_epoch,
                 ..
             } = self;
-            let Some(tab) = tabs.get_mut(*active) else {
+            let Some(tab) = tabs.get_mut(index) else {
                 return;
             };
             let tab_id = tab.id;
@@ -527,23 +517,36 @@ impl OxTailApp {
                 return;
             };
             if view.find.open {
-                egui::Panel::top("find-bar").show(ui, |ui| {
+                egui::Panel::top(Id::new(("find-bar", tab_id))).show(ui, |ui| {
                     history_changed = panels::find_bar(ui, tab_id, view, history, colors, now);
                 });
             }
             if view.filter.open {
-                egui::Panel::top("filter-panel").show(ui, |ui| {
+                egui::Panel::top(Id::new(("filter-panel", tab_id))).show(ui, |ui| {
                     panels::filter_panel(ui, tab_id, view, colors, now);
                 });
             }
+            if view.st.suggestion.is_some() {
+                egui::Panel::top(Id::new(("suggest", tab_id))).show(ui, |ui| {
+                    suggestion = colui::suggestion_bar(ui, view, colors);
+                });
+            }
             if view.banner.is_some() {
-                egui::Panel::top("banner").show(ui, |ui| {
+                egui::Panel::top(Id::new(("banner", tab_id))).show(ui, |ui| {
                     panels::banner(ui, view, colors);
                 });
             }
-            egui::Panel::bottom("status").show(ui, |ui| {
+            egui::Panel::bottom(Id::new(("status", tab_id))).show(ui, |ui| {
                 status_action = panels::status_bar(ui, view, profiles);
             });
+            if view.detail_open && view.st.parser.is_some() {
+                egui::Panel::bottom(Id::new(("detail", tab_id)))
+                    .resizable(true)
+                    .default_size(170.0)
+                    .show(ui, |ui| {
+                        copy = colui::detail_pane(ui, view, colors);
+                    });
+            }
             let env = ViewEnv {
                 colors,
                 font_size: settings.font_size,
@@ -551,6 +554,7 @@ impl OxTailApp {
                 line_numbers: settings.line_numbers,
                 minimap: true,
                 style_epoch: *style_epoch,
+                gap_secs: settings.time_gap_threshold_secs,
             };
             egui::CentralPanel::no_frame().show(ui, |ui| {
                 logview::show(ui, Id::new(("log", tab_id)), view, &env);
@@ -558,6 +562,17 @@ impl OxTailApp {
         }
         if history_changed {
             self.mark_history_dirty();
+        }
+        if let Some(text) = copy {
+            ui.ctx().copy_text(text);
+        }
+        if let Some(view) = self.tabs.get_mut(index).and_then(Tab::view_mut) {
+            match suggestion {
+                SuggestionAction::None => {}
+                SuggestionAction::Accept => view.accept_suggestion(),
+                SuggestionAction::Choose => view.chooser.open = true,
+                SuggestionAction::Dismiss => view.dismiss_suggestion(),
+            }
         }
         match status_action {
             StatusAction::None => {}
@@ -570,10 +585,19 @@ impl OxTailApp {
 
     fn windows_ui(&mut self, ctx: &Context) {
         self.goto_window(ctx);
+        self.goto_time_window(ctx);
+        self.merge_window(ctx);
+        self.cross_window(ctx);
         self.bookmark_window(ctx);
         self.settings_window(ctx);
         self.shortcuts_window(ctx);
         self.about_window(ctx);
+        let colors = self.colors.clone();
+        if let Some(view) = self.active_view_mut() {
+            colui::chooser_window(ctx, view);
+            colui::stats_window(ctx, view, &colors);
+            colui::export_window(ctx, view, &colors);
+        }
         if self.rule_editor.open {
             let preview: Vec<String> = self
                 .active_view()
@@ -582,6 +606,76 @@ impl OxTailApp {
             let colors = self.colors.clone();
             let action = self.rule_editor.show(ctx, &colors, &preview);
             self.handle_editor_action(action);
+        }
+    }
+
+    fn goto_time_window(&mut self, ctx: &Context) {
+        let Some(mut dlg) = self.windows.goto_time.take() else {
+            return;
+        };
+        let mut close = false;
+        let mut apply = false;
+        let mut cancel_search = false;
+        egui::Window::new("Go to time")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_TOP, [0.0, 90.0])
+            .show(ctx, |ui| {
+                ui.label("2026-09-29 10:00, 10:15, -15m (from the end) or +1h (from the start)");
+                let searching = dlg.job.is_some();
+                let resp = ui.add_enabled(
+                    !searching,
+                    egui::TextEdit::singleline(&mut dlg.text)
+                        .hint_text("e.g. 2026-09-29 10:00")
+                        .desired_width(300.0),
+                );
+                if dlg.focus {
+                    resp.request_focus();
+                    dlg.focus = false;
+                }
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    apply = true;
+                }
+                if let Some(e) = &dlg.error {
+                    ui.label(RichText::new(e).color(egui::Color32::LIGHT_RED));
+                }
+                ui.horizontal(|ui| {
+                    if searching {
+                        ui.spinner();
+                        ui.label("Searching\u{2026}");
+                        if ui.button("Cancel").clicked() {
+                            cancel_search = true;
+                        }
+                    } else {
+                        if ui.button("Go").clicked() {
+                            apply = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    }
+                });
+            });
+        if cancel_search {
+            // Dropping the job cancels the worker.
+            dlg.job = None;
+        }
+        self.windows.goto_time = Some(dlg);
+        if apply {
+            let text = self
+                .windows
+                .goto_time
+                .as_ref()
+                .map(|d| d.text.clone())
+                .unwrap_or_default();
+            if let Err(e) = self.apply_goto_time(&text)
+                && let Some(d) = self.windows.goto_time.as_mut()
+            {
+                d.error = Some(e);
+            }
+        }
+        if close {
+            self.windows.goto_time = None;
         }
     }
 
@@ -692,6 +786,8 @@ impl OxTailApp {
         let mut wrap = self.settings.wrap;
         let mut numbers = self.settings.line_numbers;
         let mut notifications = self.settings.notifications_enabled;
+        let mut zone = self.settings.timezone.clone();
+        let mut gap_secs = self.settings.time_gap_threshold_secs;
         let theme_names: Vec<String> = self
             .themes
             .themes()
@@ -770,6 +866,46 @@ impl OxTailApp {
                         ui.label("Desktop notifications for alert rules");
                         ui.checkbox(&mut notifications, "");
                         ui.end_row();
+                        ui.label("Time zone");
+                        ui.horizontal(|ui| {
+                            let label = match &zone {
+                                TimezoneSetting::Local => "Local".to_string(),
+                                TimezoneSetting::Utc => "UTC".to_string(),
+                                TimezoneSetting::Named(_) => "Named".to_string(),
+                            };
+                            egui::ComboBox::from_id_salt("time-zone")
+                                .selected_text(label)
+                                .width(80.0)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut zone, TimezoneSetting::Local, "Local");
+                                    ui.selectable_value(&mut zone, TimezoneSetting::Utc, "UTC");
+                                    if ui
+                                        .selectable_label(
+                                            matches!(zone, TimezoneSetting::Named(_)),
+                                            "Named",
+                                        )
+                                        .clicked()
+                                        && !matches!(zone, TimezoneSetting::Named(_))
+                                    {
+                                        zone = TimezoneSetting::Named("Europe/Amsterdam".into());
+                                    }
+                                });
+                            if let TimezoneSetting::Named(n) = &mut zone {
+                                ui.add(
+                                    egui::TextEdit::singleline(n)
+                                        .desired_width(150.0)
+                                        .hint_text("IANA name, e.g. Europe/Amsterdam"),
+                                );
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Time gap separator (seconds, 0 = off)");
+                        ui.add(
+                            egui::DragValue::new(&mut gap_secs)
+                                .range(0.0..=86_400.0)
+                                .speed(0.5),
+                        );
+                        ui.end_row();
                     });
                 ui.separator();
                 ui.label(
@@ -793,6 +929,14 @@ impl OxTailApp {
         }
         if numbers != self.settings.line_numbers {
             self.settings.line_numbers = numbers;
+            dirty = true;
+        }
+        if zone != self.settings.timezone {
+            self.settings.timezone = zone;
+            dirty = true;
+        }
+        if (gap_secs - self.settings.time_gap_threshold_secs).abs() > f64::EPSILON {
+            self.settings.time_gap_threshold_secs = gap_secs.max(0.0);
             dirty = true;
         }
         if notifications != self.settings.notifications_enabled {
@@ -865,7 +1009,12 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         "Next / previous match (in the find field)",
     ),
     ("Ctrl+Shift+F", "Filter view"),
+    ("Ctrl+Alt+F", "Search in all open tabs"),
     ("Ctrl+G", "Go to line (123, +100, -50, 50%)"),
+    (
+        "Ctrl+Shift+G",
+        "Go to time (2026-09-29 10:00, 10:15, -15m from the end, +1h from the start)",
+    ),
     (
         "Ctrl+F2 / F2 / Shift+F2",
         "Toggle / next / previous bookmark",
@@ -914,5 +1063,5 @@ fn drop_overlay(ctx: &Context) {
 
 /// Windows that exist, for tests.
 pub fn any_window_open(w: &Windows) -> bool {
-    w.goto.is_some() || w.settings || w.shortcuts || w.about
+    w.goto.is_some() || w.goto_time.is_some() || w.settings || w.shortcuts || w.about
 }

@@ -20,7 +20,9 @@ ARGS:
 OPTIONS:
     -n, --lines N        Start with the last N lines instead of the default tail view
         --profile NAME   Highlight profile for the opened files
-        --filter QUERY   Filter the opened files (only lines containing QUERY)
+        --filter QUERY   Filter the opened files (only lines containing QUERY; start
+                         with ? for a column query, e.g. '?level:ERROR status>=500')
+        --merge          Open all the files as one merged tab, interleaved by timestamp
         --data-dir PATH  Use PATH as the data folder (settings, profiles, session)
         --renderer R     auto (default), wgpu or glow
         --new-instance   Do not hand the files to a running instance; start a new one
@@ -41,6 +43,8 @@ pub struct Cli {
     pub profile: Option<String>,
     /// `--filter`.
     pub filter: Option<String>,
+    /// `--merge`: the files form one merged tab.
+    pub merge: bool,
     /// `--data-dir`.
     pub data_dir: Option<PathBuf>,
     /// `--renderer` (none means "use the setting").
@@ -62,6 +66,7 @@ impl Cli {
             tail_lines: self.lines,
             profile: self.profile.clone(),
             filter: self.filter.clone(),
+            merge: self.merge,
         }
     }
 }
@@ -112,6 +117,7 @@ where
                 cli.renderer = Some(parse_renderer(&value_string(&mut parser)?)?);
             }
             Long("new-instance") => cli.new_instance = true,
+            Long("merge") => cli.merge = true,
             Value(v) => {
                 if v == "-" {
                     cli.stdin = true;
@@ -201,6 +207,16 @@ mod tests {
         assert_eq!(r.tail_lines, Some(5));
         assert_eq!(r.profile.as_deref(), Some("x"));
         assert_eq!(r.files.len(), 1);
+    }
+
+    #[test]
+    fn merge_flag_marks_the_request() {
+        let c = p(&["--merge", "a.log", "b.log"]).unwrap();
+        assert!(c.merge);
+        let r = c.to_request();
+        assert!(r.merge);
+        assert_eq!(r.files.len(), 2);
+        assert!(!p(&["a.log"]).unwrap().to_request().merge);
     }
 
     #[test]

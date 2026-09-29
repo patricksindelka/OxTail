@@ -24,6 +24,10 @@ pub enum Action {
     Filter,
     /// Go to line (Ctrl+G).
     GotoLine,
+    /// Go to a time (Ctrl+Shift+G).
+    GotoTime,
+    /// Search in all open tabs (Ctrl+Alt+F).
+    FindInTabs,
     /// Toggle a bookmark on the current line (Ctrl+F2).
     ToggleBookmark,
     /// Next bookmark (F2).
@@ -84,6 +88,8 @@ impl Action {
                 | Action::FindPrev
                 | Action::Filter
                 | Action::GotoLine
+                | Action::GotoTime
+                | Action::FindInTabs
                 | Action::ToggleBookmark
                 | Action::NextBookmark
                 | Action::PrevBookmark
@@ -113,6 +119,7 @@ pub fn map(key: Key, mods: Modifiers) -> Option<Action> {
                 Action::NextTab
             }
         }
+        Key::F if cmd && alt && !shift => Action::FindInTabs,
         Key::F if cmd && shift && !alt => Action::Filter,
         Key::F if cmd && !shift && !alt => Action::Find,
         Key::F3 if !cmd && !alt => {
@@ -122,6 +129,7 @@ pub fn map(key: Key, mods: Modifiers) -> Option<Action> {
                 Action::FindNext
             }
         }
+        Key::G if cmd && shift && !alt => Action::GotoTime,
         Key::G if cmd && !shift && !alt => Action::GotoLine,
         Key::F2 if cmd && !alt => Action::ToggleBookmark,
         Key::F2 if !cmd && !alt => {
@@ -183,6 +191,8 @@ mod tests {
         assert_eq!(map(Key::F3, NONE), Some(Action::FindNext));
         assert_eq!(map(Key::F3, shift), Some(Action::FindPrev));
         assert_eq!(map(Key::G, cmd), Some(Action::GotoLine));
+        assert_eq!(map(Key::G, cmd_shift), Some(Action::GotoTime));
+        assert_eq!(map(Key::F, m(true, false, true)), Some(Action::FindInTabs));
         assert_eq!(map(Key::F2, cmd), Some(Action::ToggleBookmark));
         assert_eq!(map(Key::F2, NONE), Some(Action::NextBookmark));
         assert_eq!(map(Key::F2, shift), Some(Action::PrevBookmark));

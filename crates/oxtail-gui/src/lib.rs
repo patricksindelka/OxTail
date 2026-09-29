@@ -21,6 +21,12 @@
 //! | [`highlight`], [`rules`], [`ruleeditor`] | Highlight state, profile rule adapter, the rule editor |
 //! | [`alerts`], [`persist`] | Notification worker, configuration I/O worker |
 //! | [`keymap`], [`panels`], [`request`], [`startup`], [`icon`], [`util`] | Shortcuts, bars, open requests, startup data, window icon, formatting |
+//! | [`structure`], [`colspec`], [`chooser`], [`guistate`] | Which parser a tab uses (profile, detection, choice), profile table adapters, the parser chooser, remembered choices |
+//! | [`collayout`], [`table`], [`tablepaint`], [`colui`], [`detail`] | The column table: layout maths, header, cells, suggestion bar and windows, the detail pane |
+//! | [`qfilter`], [`stats`], [`export`], [`docscan`] | Column queries as filters, statistics, CSV/JSON Lines export, the scanner they share |
+//! | [`timeview`], [`gototime`] | Relative time and gap separators, go to time |
+//! | [`merge`], [`mergeview`], [`mergepaint`], [`appmerge`] | Merged tabs: builder, virtual list, painting, opening |
+//! | [`panes`], [`appsplit`], [`panesui`], [`cross`] | Split layout tree, pane state, tab strips and pane drawing, search across tabs |
 //!
 //! # Row identity
 //!
@@ -29,35 +35,68 @@
 //! offsets never are. The next line starts at `offset + len`, so the view can
 //! walk and scroll before any index exists (see [`scroll`]).
 //!
-//! The columns and time crates are dependencies, but their UI (a table view,
-//! go to time, the merged view) is a later task; the row renderer in
-//! [`logview`] is where a table would replace the single text column.
+//! # Columns, time and several files
+//!
+//! The table is another renderer of the same virtualized rows: [`logview`]
+//! paints cells (from [`tablepaint`]) instead of one text galley when the tab
+//! has a parser and the table is on. Lines are parsed only when they are
+//! prepared for drawing, cached with their highlights by offset. A merged tab
+//! has its own list ([`mergeview`]) because its rows are `(source, line)`
+//! pairs, not offsets of one file. Every long job (structure decision,
+//! statistics, export, go to time, merging, searching) is a worker thread
+//! with a cancel flag that reports back through a channel and wakes the UI.
+//!
+//! GUI-side state that the session file has no room for (column choices per
+//! file, pane layout, merged tabs) is kept in `gui-state.json` ([`guistate`]).
 
 #![forbid(unsafe_code)]
 
 pub mod alerts;
 pub mod app;
+pub mod appmerge;
+pub mod appsplit;
 pub mod appui;
+pub mod chooser;
+pub mod collayout;
 pub mod colors;
+pub mod colspec;
+pub mod colui;
+pub mod cross;
+pub mod detail;
+pub mod docscan;
 pub mod docview;
+pub mod export;
 pub mod filter;
 pub mod find;
 pub mod goto;
+pub mod gototime;
+pub mod guistate;
 pub mod highlight;
 pub mod icon;
 pub mod keymap;
 pub mod linecache;
 pub mod logview;
+pub mod merge;
+pub mod mergepaint;
+pub mod mergeview;
 pub mod minimap;
 pub mod panels;
+pub mod panes;
+pub mod panesui;
 pub mod persist;
+pub mod qfilter;
 pub mod request;
 pub mod ruleeditor;
 pub mod rules;
 pub mod scroll;
 pub mod startup;
+pub mod stats;
+pub mod structure;
 pub mod tab;
+pub mod table;
+pub mod tablepaint;
 pub mod text;
+pub mod timeview;
 pub mod util;
 pub mod viewport;
 
