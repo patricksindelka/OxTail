@@ -92,9 +92,15 @@ fn column_rules_from_a_profile_highlight_after_accepting() {
         .find(|n| n.to_lowercase().contains("logfmt"))
         .expect("a logfmt profile");
     h.state_mut().set_profile(Some(name));
-    step_until(&mut h, "rows again", |a| {
+    // Wait for the profile's structure decision to be applied, then check the
+    // settled state: before that, the table from the accepted suggestion is
+    // still showing, which let this test pass by winning a race (and fail on
+    // a loaded runner, CI run 17, when switching profiles turned it off).
+    step_until(&mut h, "profile applied, table rows again", |a| {
         a.active_view().is_some_and(|v| {
-            v.table_active() && v.last_rows.iter().any(|l| l.text.contains("level=error"))
+            !v.st.is_deciding()
+                && v.table_active()
+                && v.last_rows.iter().any(|l| l.text.contains("level=error"))
         })
     });
     let v = h.state().active_view().unwrap();

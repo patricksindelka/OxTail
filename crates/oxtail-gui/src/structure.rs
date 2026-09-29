@@ -359,7 +359,11 @@ impl Structure {
                     offer_table,
                     layout,
                 } = *a;
-                if offer_table {
+                // A new parser that arrives while the table is showing (e.g. the
+                // user switched profiles after accepting columns) keeps the table
+                // instead of switching it off and asking again.
+                let keep_table = self.table && self.parser.is_some();
+                if offer_table && !keep_table {
                     self.suggestion = Some(Suggestion {
                         name: name.clone(),
                         spec: spec.clone(),
@@ -372,7 +376,7 @@ impl Structure {
                     });
                 }
                 self.install(spec, parser, name, origin, &order, layout.as_ref());
-                self.table = table;
+                self.table = table || keep_table;
             }
             Outcome::Suggest(list) => {
                 if let Some(best) = list.first() {
@@ -638,6 +642,26 @@ mod tests {
         // Plain prose gives nothing to suggest.
         let r = decide(&input, &lines("hello there\nthis is prose\nnothing here\n"));
         assert!(matches!(r.outcome, Outcome::Nothing));
+    }
+
+    /// Regression (CI run 17): switching the profile after accepting columns
+    /// switched the table off again and re-offered it.
+    #[test]
+    fn a_profile_parser_arriving_while_the_table_shows_keeps_the_table() {
+        let tz = TimezoneSetting::default();
+        let mut st = Structure::new();
+        // No table yet: the profile's parser is offered, not forced.
+        st.apply(decide(&nginx_input(), &lines(NGINX)), &tz);
+        assert!(!st.table && st.suggestion.is_some() && st.parser.is_some());
+        st.accept_suggestion();
+        assert!(st.table && st.suggestion.is_none());
+        // Same kind of result again (a profile change): the table stays.
+        st.apply(decide(&nginx_input(), &lines(NGINX)), &tz);
+        assert!(st.table, "the table must stay on");
+        assert!(
+            st.suggestion.is_none(),
+            "nothing to ask: columns are showing"
+        );
     }
 
     #[test]
