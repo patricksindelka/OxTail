@@ -5,7 +5,8 @@ manager manifests (PLAN.md 3.3, M6). Layout:
 
 | Path | Purpose |
 |---|---|
-| `../.github/workflows/release.yml` | The release workflow |
+| `../.github/workflows/ci.yml` | Builds, tests and packages every push; publishes on `v*` tags |
+| `version.sh` | Resolves the version (and checks it against the tag) for the workflow |
 | `icons/` | App icon: `oxtail.svg`, PNGs, `oxtail.ico`, `oxtail.icns`. `make_icons.py` regenerates the raster files from the geometry in `crates/oxtail-gui/src/icon.rs` (there is no other icon source) |
 | `linux/` | `.desktop` file, AppStream metainfo, `nfpm.yaml` (deb and rpm) |
 | `windows/` | `oxtail.wxs` (WiX 3 MSI source), `sign.ps1` (signtool wrapper) |
@@ -22,16 +23,15 @@ The application id (bundle id, Flatpak id, desktop file name, AppStream id) is
 1. Bump `version` in the root `Cargo.toml` (`[workspace.package]`) and add a
    `<release version="X.Y.Z" date="...">` entry to
    `linux/io.github.patricksindelka.OxTail.metainfo.xml`. Commit.
-2. Dry run first: Actions, "Release", "Run workflow", keep `dry_run` checked. It
-   builds everything and uploads workflow artifacts (`linux-x86_64`,
-   `windows-x86_64`, `macos-universal`, `release-files`, `manifests`) without
-   publishing anything.
-3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. The `meta` job fails
-   if the tag differs from the crate version. The `publish` job then creates the
-   GitHub Release (pre-release if the version contains `-`) with all artifacts and
-   `SHA256SUMS`. A manual run never publishes.
-4. Submit the package manager manifests by hand from the `manifests` artifact
-   (see below).
+2. Push and wait for CI to go green. Every CI run already builds all the
+   packages and uploads them as workflow artifacts (`oxtail-Linux`,
+   `oxtail-Windows`, `oxtail-macOS`), so the release is exactly what CI tested.
+3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. CI runs in full on
+   the tag (`version.sh` fails if the tag differs from the crate version), then
+   the `publish` job creates the GitHub Release (pre-release if the version
+   contains `-`) with all packages, `SHA256SUMS` and the rendered manifests
+   (`oxtail-X.Y.Z-manifests.tar.gz`). Only tags publish.
+4. Submit the package manager manifests by hand from that archive (see below).
 
 ## Artifacts
 
@@ -94,8 +94,8 @@ GPG-signing them is an open decision).
 
 ## Package manager manifests
 
-`release.yml` runs `render-manifests.py` and uploads the result as the `manifests`
-workflow artifact. Submitting is manual:
+On a tag, the `publish` job runs `render-manifests.py` and attaches the result to
+the release as `oxtail-X.Y.Z-manifests.tar.gz`. Submitting is manual:
 
 - **winget**: copy `winget/*.yaml` into a `winget-pkgs` fork at
   `manifests/o/OxTail/OxTail/<version>/` (or run `wingetcreate update OxTail.OxTail

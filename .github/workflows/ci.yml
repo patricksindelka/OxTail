@@ -1,86 +1,294 @@
 name: CI
 
+# One job per platform does everything on one runner, so the toolchain and the
+# crates are set up and cached once: format (Linux), clippy, tests, the release
+# build, the dependency/size check, and the packages. Every push therefore
+# builds real, downloadable packages (unsigned unless the signing secrets
+# exist, see packaging/README.md). A `v*` tag additionally publishes them as a
+# GitHub Release. Fuzzing is one extra job.
+
 on:
   push:
     branches: ['**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push supersedes a running branch build; a release tag always finishes.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # No RUSTFLAGS here: it would replace the target rustflags in .cargo/config.toml
+  # (the static CRT on Windows) and change the flags between steps, which forces
+  # rebuilds. Warnings are denied through clippy instead.
+  GLIBC_BASELINE: '2.28'
+  ZIGLANG_VERSION: 0.15.1
+  CARGO_ZIGBUILD_VERSION: 0.23.4
+  APPIMAGETOOL_VERSION: 1.9.0
+  NFPM_VERSION: v2.41.3
+  WIX_VERSION: 3.14.1
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
 
 jobs:
-  fmt:
-    timeout-minutes: 10
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.94.1
-        with:
-          components: rustfmt
-      - run: cargo fmt --all --check
-
-  check:
-    timeout-minutes: 60
+  build:
+    name: ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            targets: x86_64-unknown-linux-gnu
+          - name: Windows
+            os: windows-latest
+            targets: x86_64-pc-windows-msvc
+          - name: macOS
+            os: macos-latest
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.94.1
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - run: cargo clippy --workspace --all-targets
-      - run: cargo test --workspace --no-fail-fast
-
-  portability:
-    timeout-minutes: 45
-    needs: check
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     env:
-      # RUSTFLAGS replaces the target rustflags in .cargo/config.toml, so repeat
-      # the static CRT here or the Windows build links the dynamic one.
-      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-D warnings -C target-feature=+crt-static' || '-D warnings' }}
+      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: clippy, rustfmt
+          targets: ${{ matrix.targets }}
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - run: cargo build --release -p oxtail-cli
-      - run: cargo run -q -p xtask -- check-deps --binary target/release/oxtail${{ runner.os == 'Windows' && '.exe' || '' }}
-      # Downloadable test builds (not releases): the binary plus the `portable`
-      # marker, so settings stay in an `oxtail-data` folder next to it.
-      - name: Stage the portable build
-        shell: bash
+      - name: Version
+        run: bash packaging/version.sh
+
+      # ---------------------------------------------------------------- checks
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --no-fail-fast --locked
+
+      # --------------------------------------------------------- release build
+      - name: Build (Linux, glibc ${{ env.GLIBC_BASELINE }})
+        if: runner.os == 'Linux'
         run: |
-          mkdir -p dist/oxtail
-          cp target/release/oxtail${{ runner.os == 'Windows' && '.exe' || '' }} dist/oxtail/
-          touch dist/oxtail/portable
+          python3 -m pip install --user --break-system-packages --quiet "ziglang==$ZIGLANG_VERSION"
+          # cargo-zigbuild lands in ~/.cargo/bin, which rust-cache keeps between runs.
+          if [ "$(cargo zigbuild --version 2>/dev/null | awk '{print $2}')" != "$CARGO_ZIGBUILD_VERSION" ]; then
+            cargo install cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION" --locked
+          fi
+          cargo zigbuild --release --locked -p oxtail-cli --target "x86_64-unknown-linux-gnu.$GLIBC_BASELINE"
+          bin=target/x86_64-unknown-linux-gnu/release/oxtail
+          cargo run -q -p xtask -- check-deps --binary "$bin"
+          newest=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+          echo "newest glibc symbol version: ${newest:-none}"
+          if [ -n "$newest" ] && [ "$(printf '%s\n%s\n' "$newest" "$GLIBC_BASELINE" | sort -V | tail -1)" != "$GLIBC_BASELINE" ]; then
+            echo "::error::binary needs glibc $newest, baseline is $GLIBC_BASELINE"
+            exit 1
+          fi
+          mkdir -p dist/stage dist/out
+          install -m 755 "$bin" dist/stage/oxtail
+      - name: Build (Windows, static CRT from .cargo/config.toml)
+        if: runner.os == 'Windows'
+        run: |
+          cargo build --release --locked -p oxtail-cli
+          cargo run -q -p xtask -- check-deps --binary target/release/oxtail.exe
+          mkdir -p dist/stage dist/out dist/meta
+          cp target/release/oxtail.exe dist/stage/oxtail.exe
+      - name: Build (macOS, both architectures)
+        if: runner.os == 'macOS'
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked -p oxtail-cli --target "$t"
+            # check-deps reads thin Mach-O files only, so check before lipo.
+            cargo run -q -p xtask -- check-deps --binary "target/$t/release/oxtail"
+          done
+          mkdir -p dist/out
+
+      # ------------------------------------------------------- Linux packages
+      - name: Linux packages (tar.gz, AppImage, deb, rpm)
+        if: runner.os == 'Linux'
+        run: |
+          id=io.github.patricksindelka.OxTail
+          sudo apt-get install -y -qq desktop-file-utils appstream > /dev/null
+          desktop-file-validate packaging/linux/$id.desktop
+          appstreamcli validate --no-net packaging/linux/$id.metainfo.xml \
+            || echo "::warning::appstreamcli reported problems (see log); fix before a Flathub submission"
+          grep -q "release version=\"$VERSION\"" packaging/linux/$id.metainfo.xml \
+            || echo "::warning::metainfo.xml has no <release> entry for $VERSION"
+
+          name="oxtail-$VERSION-x86_64-linux"
+          mkdir -p "dist/$name"
+          cp dist/stage/oxtail "dist/$name/oxtail"
+          : > "dist/$name/portable"   # portable-mode marker (PLAN.md 3.2)
+          for f in README.md LICENSE*; do if [ -e "$f" ]; then cp "$f" "dist/$name/"; fi; done
+          tar -C dist --owner=0 --group=0 -czf "dist/out/$name.tar.gz" "$name"
+
+          appdir=dist/OxTail.AppDir
+          mkdir -p "$appdir/usr/bin" "$appdir/usr/share/metainfo" "$appdir/usr/share/icons/hicolor/256x256/apps"
+          cp dist/stage/oxtail "$appdir/usr/bin/oxtail"
+          cp packaging/linux/$id.desktop "$appdir/$id.desktop"
+          cp packaging/icons/oxtail-256.png "$appdir/$id.png"
+          cp packaging/icons/oxtail-256.png "$appdir/usr/share/icons/hicolor/256x256/apps/$id.png"
+          cp packaging/linux/$id.metainfo.xml "$appdir/usr/share/metainfo/"
+          ln -s usr/bin/oxtail "$appdir/AppRun"
+          curl -fsSL -o dist/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-x86_64.AppImage"
+          chmod +x dist/appimagetool
+          # Run without FUSE (not available on hosted runners).
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 dist/appimagetool "$appdir" "dist/out/oxtail-$VERSION-x86_64.AppImage"
+
+          go install "github.com/goreleaser/nfpm/v2/cmd/nfpm@$NFPM_VERSION"
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          for fmt in deb rpm; do
+            nfpm package -f packaging/linux/nfpm.yaml -p "$fmt" -t dist/out/
+          done
+          dpkg-deb -c dist/out/*.deb
+
+      # ----------------------------------------------------- Windows packages
+      - name: Sign oxtail.exe
+        if: runner.os == 'Windows' && env.WINDOWS_CERT_PFX_BASE64 != ''
+        shell: pwsh
+        run: ./packaging/windows/sign.ps1 dist\stage\oxtail.exe
+      - name: Portable zip (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          if [ -z "$WINDOWS_CERT_PFX_BASE64" ]; then
+            echo "::warning::WINDOWS_CERT_PFX_BASE64 is not set; Windows artifacts are unsigned (SmartScreen will warn)"
+          fi
+          mkdir -p dist/zip
+          cp dist/stage/oxtail.exe dist/zip/
+          : > dist/zip/portable   # portable-mode marker (PLAN.md 3.2)
+          for f in README.md LICENSE*; do if [ -e "$f" ]; then cp "$f" dist/zip/; fi; done
+          (cd dist/zip && 7z a -tzip -mx=9 "../out/oxtail-$VERSION-x86_64-windows.zip" ./* > /dev/null)
+      - name: MSI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = "${env:ProgramFiles(x86)}\WiX Toolset v3.14\bin"
+          if (-not (Test-Path "$bin\candle.exe")) {
+            choco install wixtoolset --version=$env:WIX_VERSION --no-progress -y
+          }
+          if (-not (Test-Path "$bin\candle.exe")) { throw "WiX not found at $bin" }
+          $env:PATH = "$bin;$env:PATH"
+          $msi = "dist\out\oxtail-$env:VERSION-x86_64.msi"
+          candle -nologo -arch x64 "-dVersion=$env:NUMERIC_VERSION" "-dBinDir=dist\stage" "-dIconDir=packaging\icons" `
+            -out dist\oxtail.wixobj packaging\windows\oxtail.wxs
+          if ($LASTEXITCODE -ne 0) { throw 'candle failed' }
+          light -nologo -out $msi dist\oxtail.wixobj
+          if ($LASTEXITCODE -ne 0) { throw 'light failed' }
+          if ($env:WINDOWS_CERT_PFX_BASE64) { ./packaging/windows/sign.ps1 $msi }
+          # ProductCode for the winget manifest.
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @((Resolve-Path $msi).Path, 0))
+          $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, "SELECT Value FROM Property WHERE Property='ProductCode'")
+          $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null) | Out-Null
+          $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+          $code = $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, 1)
+          if ($code -notmatch '^\{[0-9A-Fa-f-]{36}\}$') { throw "unexpected ProductCode: $code" }
+          Set-Content -NoNewline -Encoding ascii dist\out\windows-product-code.txt $code
+          "ProductCode: $code"
+
+      # ------------------------------------------------------- macOS packages
+      - name: Universal .app
+        if: runner.os == 'macOS'
+        run: |
+          app=dist/OxTail.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/oxtail" \
+            target/aarch64-apple-darwin/release/oxtail target/x86_64-apple-darwin/release/oxtail
+          lipo -archs "$app/Contents/MacOS/oxtail"
+          sed "s/@VERSION@/$NUMERIC_VERSION/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
+          cp packaging/icons/oxtail.icns "$app/Contents/Resources/OxTail.icns"
+      - name: Import signing certificate
+        if: runner.os == 'macOS' && env.MACOS_CERT_P12_BASE64 != ''
+        run: |
+          kc="$RUNNER_TEMP/oxtail-signing.keychain-db"
+          kcpw=$(uuidgen)
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpw" "$kc"
+          security list-keychains -d user -s "$kc" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+      - name: Sign .app
+        if: runner.os == 'macOS'
+        run: |
+          if [ -n "$MACOS_CERT_P12_BASE64" ]; then
+            codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY" dist/OxTail.app
+            codesign --verify --strict --verbose=2 dist/OxTail.app
+          else
+            echo "::warning::MACOS_CERT_P12_BASE64 is not set; the app is only ad-hoc signed and NOT notarized (Gatekeeper will warn)"
+            codesign --force --sign - dist/OxTail.app
+          fi
+      - name: Notarize and staple .app
+        if: runner.os == 'macOS' && env.MACOS_CERT_P12_BASE64 != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        run: |
+          ditto -c -k --keepParent dist/OxTail.app dist/notarize-app.zip
+          xcrun notarytool submit dist/notarize-app.zip --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait --output-format json > dist/notary-app.json
+          cat dist/notary-app.json
+          [ "$(jq -r .status dist/notary-app.json)" = Accepted ] || { echo "::error::notarization was not accepted"; exit 1; }
+          xcrun stapler staple dist/OxTail.app
+          rm dist/notarize-app.zip
+      - name: Portable zip and DMG (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ditto -c -k --keepParent dist/OxTail.app "dist/out/oxtail-$VERSION-macos-universal.zip"
+          mkdir dist/dmg
+          cp -R dist/OxTail.app dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          dmg="dist/out/oxtail-$VERSION-macos-universal.dmg"
+          hdiutil create -volname OxTail -srcfolder dist/dmg -ov -format UDZO "$dmg"
+          if [ -n "$MACOS_CERT_P12_BASE64" ]; then
+            codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$dmg"
+            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
+              xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+                --password "$APPLE_APP_PASSWORD" --wait --output-format json > dist/notary-dmg.json
+              cat dist/notary-dmg.json
+              [ "$(jq -r .status dist/notary-dmg.json)" = Accepted ] || { echo "::error::notarization was not accepted"; exit 1; }
+              xcrun stapler staple "$dmg"
+            else
+              echo "::warning::Apple notarization secrets are not set; DMG signed but not notarized"
+            fi
+          fi
+      - name: Remove signing keychain
+        if: always() && runner.os == 'macOS' && env.MACOS_CERT_P12_BASE64 != ''
+        run: security delete-keychain "$RUNNER_TEMP/oxtail-signing.keychain-db" || true
+
       - uses: actions/upload-artifact@v6
         with:
-          name: oxtail-${{ runner.os }}-${{ runner.arch }}
-          path: dist/oxtail
+          name: oxtail-${{ matrix.name }}
+          path: dist/out/*
+          if-no-files-found: error
           retention-days: 30
 
-  fuzz-build:
-    # cargo-fuzz needs nightly (sanitizer flags). The build must pass.
-    timeout-minutes: 30
+  fuzz:
+    # cargo-fuzz needs nightly. The build must pass; the short timed runs report
+    # findings (warnings and uploaded crash inputs) without failing the build.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
@@ -88,49 +296,54 @@ jobs:
         with:
           workspaces: fuzz
           cache-on-failure: true
-      - run: cargo install cargo-fuzz --locked
+      - name: Install cargo-fuzz
+        run: cargo fuzz --version || cargo install cargo-fuzz --locked
       - name: Build all fuzz targets
         working-directory: fuzz
         run: cargo fuzz build
-
-  fuzz-smoke:
-    # Short timed runs of every target. Findings are reported but do not fail
-    # the build (continue-on-error); crash artifacts are uploaded.
-    timeout-minutes: 20
-    needs: fuzz-build
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - index_vs_naive
-          - transcoder
-          - read_lines
-          - search_matcher
-          - highlight_rules
-          - ansi_parse
-          - time_detect
-          - config_session_json
-          - config_settings_toml
-          - columns_parsers
-          - columns_detect
-          - columns_query
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: fuzz
-          cache-on-failure: true
-      - run: cargo install cargo-fuzz --locked
-      - name: Fuzz ${{ matrix.target }} for 30 s
+      - name: Fuzz every target for 30 s (4 at a time)
         working-directory: fuzz
         continue-on-error: true
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=30 -rss_limit_mb=2048
+        run: |
+          cargo fuzz list | xargs -P 4 -I{} sh -c \
+            'cargo fuzz run {} -- -max_total_time=30 -rss_limit_mb=2048 > "fuzz-{}.log" 2>&1 \
+               && echo "{}: ok" || { echo "::warning::fuzz target {} found a problem"; tail -n 40 "fuzz-{}.log"; }'
       - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: fuzz-artifacts-${{ matrix.target }}
-          path: fuzz/artifacts/${{ matrix.target }}
+          name: fuzz-artifacts
+          path: fuzz/artifacts
           if-no-files-found: ignore
+
+  publish:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Version
+        run: bash packaging/version.sh
+      - name: Collect packages
+        run: |
+          gh run download "$GITHUB_RUN_ID" --pattern 'oxtail-*' --dir dist/all
+          mkdir -p dist/release dist/manifests
+          find dist/all -type f ! -name windows-product-code.txt -exec cp {} dist/release/ \;
+          (cd dist/release && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+      - name: Render winget, Homebrew and Scoop manifests
+        run: |
+          python3 packaging/render-manifests.py --version "$VERSION" --sums dist/release/SHA256SUMS \
+            --out dist/manifests --product-code "$(cat dist/all/oxtail-Windows/windows-product-code.txt)"
+          (cd dist && tar -czf "release/oxtail-$VERSION-manifests.tar.gz" manifests)
+      - name: Create GitHub Release
+        run: |
+          flags=(--title "OxTail $VERSION" --generate-notes --verify-tag)
+          case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" dist/release/*

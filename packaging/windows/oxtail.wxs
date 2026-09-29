@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  OxTail MSI (WiX Toolset v3). Built by .github/workflows/release.yml with
+  OxTail MSI (WiX Toolset v3). Built by .github/workflows/ci.yml with
     candle -arch x64 -dVersion=X.Y.Z -dBinDir=<dir with oxtail.exe> -dIconDir=packaging\icons
     light -out oxtail-X.Y.Z-x86_64.msi
   Rules (PLAN.md 3.1):
     * No file associations, no context menu entries, no PATH change. Integration is
       an opt-in action inside the app.
-    * No registry writes beyond Windows Installer's own bookkeeping (the Start menu
-      shortcut is the key path of the exe component, so no HKCU key is needed).
+    * No registry writes beyond Windows Installer's own bookkeeping: the Start menu
+      shortcut needs its own component with a registry key path (ICE43/ICE57), so
+      one value is written under HKMCU\Software\OxTail (HKLM for this per-machine
+      package) and removed on uninstall.
     * No "portable" marker: an installed copy stores settings in %APPDATA%\OxTail.
   Per-machine by default (InstallScope=perMachine, needs elevation, installs to
   Program Files). Change the folder with INSTALLFOLDER="D:\Tools\OxTail". A
@@ -44,20 +46,29 @@
 
     <DirectoryRef Id="INSTALLFOLDER">
       <Component Id="OxTailExe" Guid="*" Win64="yes">
-        <File Id="OxTailExeFile" Name="oxtail.exe" Source="$(var.BinDir)\oxtail.exe" KeyPath="yes">
-          <Shortcut Id="StartMenuShortcut"
-                    Directory="ProgramMenuFolder"
-                    Name="OxTail"
-                    Description="Fast real-time log viewer"
-                    WorkingDirectory="INSTALLFOLDER"
-                    Icon="oxtail.ico"
-                    Advertise="no" />
-        </File>
+        <File Id="OxTailExeFile" Name="oxtail.exe" Source="$(var.BinDir)\oxtail.exe" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- A non-advertised shortcut must be in its own component whose key path is a
+         registry value (ICE43), and that value must not mix per-user and per-machine
+         data (ICE57): HKMCU resolves to HKLM for a per-machine install. -->
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="7aab77b3-5dde-46f2-a6e3-b0e48eff5c52" Win64="yes">
+        <Shortcut Id="StartMenuShortcut"
+                  Name="OxTail"
+                  Description="Fast real-time log viewer"
+                  Target="[#OxTailExeFile]"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="oxtail.ico" />
+        <RegistryValue Root="HKMCU" Key="Software\OxTail" Name="StartMenuShortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </DirectoryRef>
 
     <Feature Id="Main" Title="OxTail" Level="1">
       <ComponentRef Id="OxTailExe" />
+      <ComponentRef Id="StartMenuShortcut" />
     </Feature>
   </Product>
 </Wix>
