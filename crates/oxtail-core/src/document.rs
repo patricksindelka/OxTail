@@ -54,7 +54,7 @@ use crate::index::{
     DEFAULT_SPACING, LineIndex, LineSeek, SCAN_CHUNK, Scanner, count_newlines, find_tail_start,
     line_start_before_bounded,
 };
-use crate::line::{DEFAULT_MAX_DISPLAY_LEN, Line, read_lines};
+use crate::line::{DEFAULT_MAX_DISPLAY_LEN, Line, read_lines_capped};
 use crate::source::{FileSource, PathState, ReadAt, SwitchSource};
 use crate::spool::{Spool, create_temp};
 
@@ -70,6 +70,9 @@ const MAX_BACKSCAN: u64 = 8 * 1024 * 1024;
 const MAX_ALIGN_BACK: u64 = 4 * 1024 * 1024;
 /// Upper bound on lines returned by one request.
 const MAX_REQUEST_LINES: usize = 20_000;
+/// Upper bound on the total line text (bytes) in one response; a request that
+/// would exceed it gets fewer lines.
+const MAX_RESPONSE_TEXT: usize = 8 * 1024 * 1024;
 /// A file counts as "being written" for this long after its last growth.
 const WRITING_WINDOW: Duration = Duration::from_secs(3);
 /// Minimum spacing between actor polls triggered by watcher pokes.
@@ -402,7 +405,16 @@ impl Shared {
                         (s, number, false)
                     }
                 };
-                read_lines(&self.cached, start, count, limit, number, exact, max)
+                read_lines_capped(
+                    &self.cached,
+                    start,
+                    count,
+                    limit,
+                    number,
+                    exact,
+                    max,
+                    MAX_RESPONSE_TEXT,
+                )
             }
             LineRequest::Tail { count } => {
                 let count = (*count).clamp(1, MAX_REQUEST_LINES);
@@ -411,7 +423,7 @@ impl Shared {
                 }
                 let (start, complete) = find_tail_start(&*self.view, limit, count, MAX_BACKSCAN)?;
                 let (number, exact) = self.number_at(start)?;
-                read_lines(
+                read_lines_capped(
                     &self.cached,
                     start,
                     count,
@@ -419,16 +431,32 @@ impl Shared {
                     number,
                     exact && complete,
                     max,
+                    MAX_RESPONSE_TEXT,
                 )
             }
             LineRequest::AtOffsets(offsets) => {
                 let mut out = Vec::with_capacity(offsets.len().min(MAX_REQUEST_LINES));
+                let mut budget = MAX_RESPONSE_TEXT;
                 for &off in offsets.iter().take(MAX_REQUEST_LINES) {
                     if off >= limit {
                         continue;
                     }
                     let (number, exact) = self.number_at(off)?;
-                    out.extend(read_lines(&self.cached, off, 1, limit, number, exact, max)?);
+                    let got = read_lines_capped(
+                        &self.cached,
+                        off,
+                        1,
+                        limit,
+                        number,
+                        exact,
+                        max,
+                        usize::MAX,
+                    )?;
+                    budget = budget.saturating_sub(got.iter().map(|l| l.text.len()).sum());
+                    out.extend(got);
+                    if budget == 0 {
+                        break;
+                    }
                 }
                 Ok(out)
             }
@@ -445,7 +473,7 @@ impl Shared {
                 let off = ((f * limit as f64) as u64).min(limit - 1);
                 let (start, complete) = self.line_start_containing(off)?;
                 let (number, exact) = self.number_at(start)?;
-                read_lines(
+                read_lines_capped(
                     &self.cached,
                     start,
                     count,
@@ -453,6 +481,7 @@ impl Shared {
                     number,
                     exact && complete,
                     max,
+                    MAX_RESPONSE_TEXT,
                 )
             }
         }

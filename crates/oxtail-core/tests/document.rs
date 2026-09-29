@@ -682,3 +682,35 @@ fn requests_on_a_huge_single_line_read_bounded_bytes() {
     assert_eq!(a[0].number, 0);
     assert!(a[0].number_exact);
 }
+
+#[test]
+fn one_response_never_carries_more_than_the_text_budget() {
+    // 1500 lines of ~16 KiB = ~24 MiB; asking for all of them must not yield
+    // 24 MiB of text in a single event.
+    let mut data = Vec::new();
+    for i in 0..1500 {
+        data.extend_from_slice(format!("{i:05} ").as_bytes());
+        data.extend_from_slice(&vec![b'z'; 16 * 1024 - 6]);
+        data.push(b'\n');
+    }
+    let src = Arc::new(MemSource::new(data.clone()));
+    let doc = Document::from_source_with(src, "wide", small_opts());
+    wait_ready(&doc, data.len() as u64);
+    for req in [
+        LineRequest::Range {
+            first: 0,
+            count: 20_000,
+        },
+        LineRequest::Tail { count: 20_000 },
+        LineRequest::AtOffsets((0..1500u64).map(|i| i * 16385).collect()),
+    ] {
+        let lines = request(&doc, req);
+        let total: usize = lines.iter().map(|l| l.text.len()).sum();
+        assert!(!lines.is_empty());
+        assert!(lines.len() < 1500, "{} lines", lines.len());
+        assert!(
+            total <= 8 * 1024 * 1024 + 16 * 1024,
+            "{total} bytes of text"
+        );
+    }
+}

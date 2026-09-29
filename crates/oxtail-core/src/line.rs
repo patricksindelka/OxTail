@@ -124,6 +124,34 @@ pub fn read_lines(
     exact: bool,
     max_display_len: usize,
 ) -> io::Result<Vec<Line>> {
+    read_lines_capped(
+        src,
+        start,
+        count,
+        limit,
+        first_number,
+        exact,
+        max_display_len,
+        usize::MAX,
+    )
+}
+
+/// Like [`read_lines`], but stops once the returned `text` fields add up to
+/// `max_text_bytes` (the line that crosses the budget is still included, so
+/// at least one line is returned when any exists). Keeps a response bounded
+/// even when `count * max_display_len` would be enormous.
+#[allow(clippy::too_many_arguments)] // mirrors `read_lines` plus the budget
+pub fn read_lines_capped(
+    src: &dyn ReadAt,
+    start: u64,
+    count: usize,
+    limit: u64,
+    first_number: u64,
+    exact: bool,
+    max_display_len: usize,
+    max_text_bytes: usize,
+) -> io::Result<Vec<Line>> {
+    let mut text_total = 0usize;
     let mut lines = Vec::with_capacity(count.min(4096));
     if count == 0 || start >= limit {
         return Ok(lines);
@@ -148,9 +176,11 @@ pub fn read_lines(
                     let number = first_number + lines.len() as u64;
                     let next_off = pos + (i + p) as u64 + 1;
                     let done = std::mem::replace(&mut cur, Partial::new(next_off));
-                    lines.push(done.finish(true, number, exact, max_display_len));
+                    let line = done.finish(true, number, exact, max_display_len);
+                    text_total = text_total.saturating_add(line.text.len());
+                    lines.push(line);
                     i += p + 1;
-                    if lines.len() >= count {
+                    if lines.len() >= count || text_total >= max_text_bytes {
                         break 'outer;
                     }
                 }
@@ -222,6 +252,23 @@ mod tests {
         assert!(lines[0].truncated);
         assert_eq!(lines[0].len, 3 * 1024 * 1024 + 1);
         assert_eq!(lines[1].text, "z");
+    }
+
+    #[test]
+    fn text_budget_limits_the_response() {
+        let mut data = Vec::new();
+        for _ in 0..100 {
+            data.extend_from_slice(&[b'y'; 99]);
+            data.push(b'\n');
+        }
+        let src = MemSource::new(data.clone());
+        let l = read_lines_capped(&src, 0, 100, data.len() as u64, 0, true, 1000, 1000).unwrap();
+        assert_eq!(l.len(), 11); // the 11th line crosses the 1000-byte budget
+        let l = read_lines_capped(&src, 0, 100, data.len() as u64, 0, true, 1000, 1).unwrap();
+        assert_eq!(l.len(), 1, "always at least one line");
+        let l =
+            read_lines_capped(&src, 0, 100, data.len() as u64, 0, true, 1000, usize::MAX).unwrap();
+        assert_eq!(l.len(), 100);
     }
 
     #[test]
