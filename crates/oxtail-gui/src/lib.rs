@@ -60,6 +60,7 @@ pub mod ruleeditor;
 pub mod rules;
 pub mod scroll;
 pub mod startup;
+pub mod structure;
 pub mod tab;
 pub mod text;
 pub mod util;

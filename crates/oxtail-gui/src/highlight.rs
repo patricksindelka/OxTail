@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use oxtail_columns::{Parser, Record};
 use oxtail_config::{Profile, ProfileSet};
 use oxtail_core::Line;
 use oxtail_highlight::{
@@ -29,6 +30,9 @@ pub struct Prepared {
     pub ansi: Vec<StyledSpan>,
     /// What the rules found in `text`.
     pub hl: LineHighlight,
+    /// The columns of `text`, when the tab has a parser and the line is a
+    /// record (`None` for continuation lines and plain text).
+    pub record: Option<Record<'static>>,
 }
 
 /// Compiles `rules`, dropping (with a warning) any rule that does not
@@ -76,6 +80,8 @@ pub struct HighlightState {
     pub show_ansi: bool,
     /// The predicate for lines that hide rules fold away.
     pub hide: Option<Arc<dyn LinePredicate>>,
+    /// The tab's column parser: column rules see the parsed byte ranges.
+    parser: Option<Arc<Parser>>,
     cache: HashMap<u64, Arc<Prepared>>,
     /// Minimap ticks of lines seen so far, by line start offset.
     pub ticks: BTreeMap<u64, ColorRef>,
@@ -99,9 +105,23 @@ impl HighlightState {
             epoch: 0,
             show_ansi: true,
             hide: None,
+            parser: None,
             cache: HashMap::new(),
             ticks: BTreeMap::new(),
         }
+    }
+
+    /// Uses `parser` to give column rules their byte ranges (and to attach
+    /// the parsed record to prepared lines). `None` for plain text.
+    pub fn set_parser(&mut self, parser: Option<Arc<Parser>>) {
+        self.parser = parser;
+        self.clear_cache();
+        self.epoch += 1;
+    }
+
+    /// The tab's column parser.
+    pub fn parser(&self) -> Option<&Arc<Parser>> {
+        self.parser.as_ref()
     }
 
     /// Replaces the rules.
@@ -188,8 +208,29 @@ impl HighlightState {
         } else {
             (line.text.clone(), Vec::new())
         };
-        let hl = self.compiled.highlight(&text, None);
-        Prepared { text, ansi, hl }
+        let record = self
+            .parser
+            .as_ref()
+            .and_then(|p| crate::structure::parse_owned(p, &text));
+        let hl = match (&self.parser, &record) {
+            (Some(p), Some(rec)) => {
+                let cols: Vec<(&str, std::ops::Range<usize>)> = p
+                    .schema()
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, c)| rec.span(i).map(|r| (c.name.as_str(), r)))
+                    .collect();
+                self.compiled.highlight(&text, Some(&cols))
+            }
+            _ => self.compiled.highlight(&text, None),
+        };
+        Prepared {
+            text,
+            ansi,
+            hl,
+            record,
+        }
     }
 
     /// Highlights arbitrary text without caching (used by the rule editor's
@@ -252,6 +293,42 @@ mod tests {
         let p = h.prepare(&line(0, "2026-01-01 ERROR something failed"));
         assert!(!p.hl.spans.is_empty());
         assert_eq!(p.text, "2026-01-01 ERROR something failed");
+    }
+
+    #[test]
+    fn column_rules_only_match_once_the_tab_has_a_parser() {
+        use oxtail_columns::ParserSpec;
+        use oxtail_highlight::{ColumnOp, RuleMatcher, Scope, SemanticColor, Style};
+        let rules = vec![
+            Rule::new(
+                "server error",
+                RuleMatcher::Column {
+                    column: "status".into(),
+                    op: ColumnOp::Ge,
+                    value: "500".into(),
+                },
+            )
+            .scoped(Scope::Column("status".into()))
+            .styled(Style::fg(ColorRef::solid(SemanticColor::Error))),
+        ];
+        let mut h = HighlightState::with_defaults();
+        h.set_rules(rules, None);
+        let text = "127.0.0.1 - - [10/Oct/2000:13:55:36 -0700] \"GET /a HTTP/1.0\" 503 12 \"-\" \"curl\"";
+        let plain = h.prepare(&line(0, text));
+        assert!(plain.hl.spans.is_empty() && plain.record.is_none());
+        let epoch = h.epoch;
+        h.set_parser(Some(Arc::new(ParserSpec::AccessCombined.compile().unwrap())));
+        assert!(h.epoch > epoch, "the painted lines must be invalidated");
+        let p = h.prepare(&line(0, text));
+        assert_eq!(p.hl.spans.len(), 1);
+        let r = &p.hl.spans[0].range;
+        assert_eq!(&p.text[r.clone()], "503");
+        assert!(p.record.is_some());
+        // A continuation line has no record and no column highlight.
+        let cont = h.prepare(&line(200, "    at com.example.Foo.bar(Foo.java:42)"));
+        assert!(cont.record.is_none() && cont.hl.spans.is_empty());
+        h.set_parser(None);
+        assert!(h.prepare(&line(0, text)).record.is_none());
     }
 
     #[test]
