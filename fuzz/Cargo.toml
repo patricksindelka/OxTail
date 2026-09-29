@@ -1,0 +1,108 @@
+[package]
+name = "oxtail-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone project: not part of the main workspace (needs nightly + cargo-fuzz).
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+oxtail-core = { path = "../crates/oxtail-core" }
+oxtail-search = { path = "../crates/oxtail-search" }
+oxtail-highlight = { path = "../crates/oxtail-highlight" }
+oxtail-time = { path = "../crates/oxtail-time" }
+oxtail-config = { path = "../crates/oxtail-config" }
+oxtail-columns = { path = "../crates/oxtail-columns" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "index_vs_naive"
+path = "fuzz_targets/index_vs_naive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transcoder"
+path = "fuzz_targets/transcoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "read_lines"
+path = "fuzz_targets/read_lines.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "search_matcher"
+path = "fuzz_targets/search_matcher.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "highlight_rules"
+path = "fuzz_targets/highlight_rules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ansi_parse"
+path = "fuzz_targets/ansi_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "time_detect"
+path = "fuzz_targets/time_detect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_session_json"
+path = "fuzz_targets/config_session_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_settings_toml"
+path = "fuzz_targets/config_settings_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "columns_parsers"
+path = "fuzz_targets/columns_parsers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "columns_detect"
+path = "fuzz_targets/columns_detect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "columns_query"
+path = "fuzz_targets/columns_query.rs"
+test = false
+doc = false
+bench = false
