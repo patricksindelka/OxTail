@@ -51,7 +51,7 @@ use parking_lot::RwLock;
 use crate::cache::{BlockCache, CachedSource, DEFAULT_CACHE_BYTES};
 use crate::encoding::{Detected, EncodingChoice, LineEnding, SAMPLE_LEN, TextEncoding, detect};
 use crate::error::CoreError;
-use crate::follow::{AdaptiveInterval, Change, FollowMode, FsWatcher, classify};
+use crate::follow::{AdaptiveInterval, Change, Fingerprint, FollowMode, FsWatcher, classify};
 use crate::index::{
     DEFAULT_SPACING, LineIndex, LineSeek, SCAN_CHUNK, Scanner, count_newlines, find_tail_start,
     line_start_before_bounded,
@@ -929,6 +929,8 @@ struct Actor {
     stalled: bool,
     initialised: bool,
     initial_tail: Option<usize>,
+    /// Samples of the consumed raw bytes, to notice silent rewrites.
+    fingerprint: Option<Fingerprint>,
     /// Tail requests waiting for the spool to catch up.
     parked: Vec<Parked>,
     source_open: Option<Arc<AtomicBool>>,
@@ -950,6 +952,7 @@ impl Actor {
             choice: setup.opts.encoding,
             initial_tail: setup.opts.start_at_tail,
             parked: Vec::new(),
+            fingerprint: None,
             opts: setup.opts,
             detected: None,
             spool: None,
@@ -1202,28 +1205,29 @@ impl Actor {
         } else {
             FollowMode::Handle
         };
-        let change = if self.initialised && !self.opts.follow && self.raw_target != 0 {
-            Change::Unchanged
-        } else {
+        let checked = !(self.initialised && !self.opts.follow && self.raw_target != 0);
+        let change = if checked {
             classify(mode, path_state, self.raw_target, cur_len)
+        } else {
+            Change::Unchanged
         };
         match change {
-            Change::Unchanged => self.interval.on_idle(),
-            Change::Grew(len) => {
-                self.missing = false;
-                self.raw_target = len;
-                self.last_growth = Some(Instant::now());
-                self.interval.on_activity();
-                self.dirty = true;
+            Change::Unchanged | Change::Grew(_) => {
+                // Sizes alone miss a rewrite that is not shorter than the old
+                // content; the fingerprint of the consumed bytes catches it.
+                if checked && !self.fingerprint_ok() {
+                    self.missing = false;
+                    self.apply_truncation(cur_len);
+                } else if let Change::Grew(len) = change {
+                    self.missing = false;
+                    self.apply_growth(len);
+                } else {
+                    self.interval.on_idle();
+                }
             }
             Change::Truncated(len) => {
                 self.missing = false;
-                self.reset_pipeline();
-                self.raw_target = len;
-                self.last_growth = Some(Instant::now());
-                self.interval.on_activity();
-                let (generation, at) = self.note(NoticeKind::Truncated);
-                self.shared.emit(DocEvent::Truncated { generation, at });
+                self.apply_truncation(len);
             }
             Change::Rotated => {
                 let reopened = self.file.as_ref().map(|f| f.reopen());
@@ -1241,7 +1245,22 @@ impl Actor {
                     _ => self.mark_removed(),
                 }
             }
-            Change::Removed => self.mark_removed(),
+            Change::Removed => {
+                self.mark_removed();
+                // The old handle is still followed: writers that keep it open
+                // (or a rename without recreation) can still grow the file.
+                match classify(
+                    FollowMode::Handle,
+                    PathState::Same,
+                    self.raw_target,
+                    cur_len,
+                ) {
+                    _ if checked && !self.fingerprint_ok() => self.apply_truncation(cur_len),
+                    Change::Grew(len) => self.apply_growth(len),
+                    Change::Truncated(len) => self.apply_truncation(len),
+                    _ => {}
+                }
+            }
         }
         self.ensure_detected();
         if let Some(d) = &self.detected
@@ -1255,10 +1274,45 @@ impl Actor {
             });
             self.dirty = true;
         }
+        self.refresh_fingerprint();
         self.dirty |= self.writing() != self.shared.snapshot.read().writing;
         if self.error.is_some() && !self.stalled {
             self.error = None;
             self.dirty = true;
+        }
+    }
+
+    /// The raw file is longer than what we knew.
+    fn apply_growth(&mut self, len: u64) {
+        self.raw_target = len;
+        self.last_growth = Some(Instant::now());
+        self.interval.on_activity();
+        self.dirty = true;
+    }
+
+    /// The raw file was truncated or rewritten: reset everything derived.
+    fn apply_truncation(&mut self, len: u64) {
+        self.reset_pipeline();
+        self.raw_target = len;
+        self.last_growth = Some(Instant::now());
+        self.interval.on_activity();
+        let (generation, at) = self.note(NoticeKind::Truncated);
+        self.shared.emit(DocEvent::Truncated { generation, at });
+    }
+
+    /// `false` when the bytes we already consumed changed under us.
+    fn fingerprint_ok(&self) -> bool {
+        match &self.fingerprint {
+            Some(fp) if fp.len() == self.raw_target => fp.still_matches(&*self.raw).unwrap_or(true),
+            _ => true,
+        }
+    }
+
+    fn refresh_fingerprint(&mut self) {
+        if self.raw_target == 0 {
+            self.fingerprint = None;
+        } else if self.fingerprint.as_ref().map(Fingerprint::len) != Some(self.raw_target) {
+            self.fingerprint = Fingerprint::capture(&*self.raw, self.raw_target).ok();
         }
     }
 
@@ -1295,6 +1349,7 @@ impl Actor {
         self.indexed = 0;
         self.shared.view_len.store(0, Ordering::Release);
         self.detected = None;
+        self.fingerprint = None;
         self.spool = None;
         self.shared.view.switch(self.raw.clone());
         self.stalled = false;

@@ -11,12 +11,13 @@
 //! Every poke or tick ends in [`classify`], a pure function that turns
 //! "what the path names now" plus sizes into a [`Change`].
 
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::source::PathState;
+use crate::source::{PathState, ReadAt};
 
 /// What to follow when a log is rotated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -59,6 +60,80 @@ pub fn classify(mode: FollowMode, path: PathState, known_len: u64, current_len: 
         std::cmp::Ordering::Greater => Change::Grew(current_len),
         std::cmp::Ordering::Less => Change::Truncated(current_len),
         std::cmp::Ordering::Equal => Change::Unchanged,
+    }
+}
+
+/// Number of bytes sampled at each end of a [`Fingerprint`].
+const FINGERPRINT_LEN: usize = 64;
+
+/// A cheap check that the bytes we already consumed are still there.
+///
+/// Comparing sizes cannot see a file that was truncated and rewritten to at
+/// least its old length between two polls (copytruncate plus quick regrowth,
+/// a `>` redirect). The fingerprint holds the first 64 bytes and the 64 bytes
+/// ending at the last known length; two small positioned reads per poll tell
+/// whether they are unchanged. Writers that pre-allocate a file with zeros
+/// and fill it later would look rewritten; the cost of that false positive is
+/// one view rebuild.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fingerprint {
+    len: u64,
+    head: Vec<u8>,
+    tail_off: u64,
+    tail: Vec<u8>,
+}
+
+fn read_exact_or_short(src: &dyn ReadAt, offset: u64, buf: &mut [u8]) -> io::Result<bool> {
+    let mut got = 0;
+    while got < buf.len() {
+        match src.read_at(offset + got as u64, &mut buf[got..])? {
+            0 => return Ok(false),
+            n => got += n,
+        }
+    }
+    Ok(true)
+}
+
+impl Fingerprint {
+    /// Samples the start of `src` and the bytes ending at `len`. Fails with
+    /// [`io::ErrorKind::UnexpectedEof`] if the source is shorter than `len`.
+    pub fn capture(src: &dyn ReadAt, len: u64) -> io::Result<Self> {
+        let n = len.min(FINGERPRINT_LEN as u64) as usize;
+        let mut head = vec![0u8; n];
+        let tail_off = len - n as u64;
+        let mut tail = vec![0u8; n];
+        if !read_exact_or_short(src, 0, &mut head)?
+            || !read_exact_or_short(src, tail_off, &mut tail)?
+        {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        Ok(Self {
+            len,
+            head,
+            tail_off,
+            tail,
+        })
+    }
+
+    /// The length this fingerprint was taken at.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// `true` for the fingerprint of an empty source.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// `true` if `src` still holds the sampled bytes (`false` also when it
+    /// became shorter than the sampled region).
+    pub fn still_matches(&self, src: &dyn ReadAt) -> io::Result<bool> {
+        let mut head = vec![0u8; self.head.len()];
+        if !read_exact_or_short(src, 0, &mut head)? || head != self.head {
+            return Ok(false);
+        }
+        let mut tail = vec![0u8; self.tail.len()];
+        Ok(read_exact_or_short(src, self.tail_off, &mut tail)? && tail == self.tail)
     }
 }
 
@@ -167,6 +242,47 @@ mod tests {
         // Handle mode ignores the path.
         assert_eq!(classify(Handle, Different, 10, 20), Grew(20));
         assert_eq!(classify(Handle, Missing, 10, 10), Unchanged);
+    }
+
+    #[test]
+    fn fingerprint_detects_rewrites_but_not_appends() {
+        use crate::source::MemSource;
+        let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let src = MemSource::new(data.clone());
+        let fp = Fingerprint::capture(&src, 1000).unwrap();
+        assert_eq!(fp.len(), 1000);
+        assert!(fp.still_matches(&src).unwrap());
+        src.append(b"more data\n");
+        assert!(fp.still_matches(&src).unwrap(), "append keeps it valid");
+        // Change one byte in the middle: not sampled, not noticed (by design).
+        let mut mid = data.clone();
+        mid[500] ^= 0xff;
+        src.replace(mid);
+        assert!(fp.still_matches(&src).unwrap());
+        // Head, tail and shrinking are noticed.
+        let mut head = data.clone();
+        head[3] ^= 1;
+        src.replace(head);
+        assert!(!fp.still_matches(&src).unwrap());
+        let mut tail = data.clone();
+        tail[990] ^= 1;
+        src.replace(tail);
+        assert!(!fp.still_matches(&src).unwrap());
+        src.replace(data[..600].to_vec());
+        assert!(!fp.still_matches(&src).unwrap());
+        // Short and empty sources.
+        let small = MemSource::new(b"abc".to_vec());
+        let fp = Fingerprint::capture(&small, 3).unwrap();
+        assert!(fp.still_matches(&small).unwrap());
+        small.replace(b"abd".to_vec());
+        assert!(!fp.still_matches(&small).unwrap());
+        assert!(Fingerprint::capture(&small, 10).is_err());
+        assert!(
+            Fingerprint::capture(&small, 0)
+                .unwrap()
+                .still_matches(&small)
+                .unwrap()
+        );
     }
 
     #[test]

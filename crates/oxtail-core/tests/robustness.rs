@@ -98,3 +98,87 @@ fn tail_of_a_large_spooled_file_is_the_real_tail() {
     assert_eq!(t[0].number, 399_999);
     assert!(t[0].number_exact);
 }
+
+fn lines_of(doc: &Document) -> Vec<String> {
+    request(
+        doc,
+        LineRequest::Range {
+            first: 0,
+            count: 100,
+        },
+    )
+    .into_iter()
+    .map(|l| l.text)
+    .collect()
+}
+
+/// A rewrite that is not shorter than the old content is not "growth".
+#[test]
+fn rewrite_to_a_longer_or_equal_size_is_detected_for_memory_sources() {
+    let src = Arc::new(MemSource::new(b"old line A\nold line B\n".to_vec()));
+    let doc = Document::from_source(src.clone(), "m");
+    wait_ready(&doc, 22);
+    let g0 = doc.generation();
+    src.replace(b"NEW 1\nNEW 2\nNEW 3\nNEW 4\nNEW 5\n".to_vec());
+    doc.refresh();
+    wait_ready(&doc, 30);
+    assert!(doc.generation() > g0, "expected a new generation");
+    assert_eq!(
+        lines_of(&doc),
+        ["NEW 1", "NEW 2", "NEW 3", "NEW 4", "NEW 5"]
+    );
+    assert_eq!(doc.snapshot().lines.known, 5);
+
+    // Exactly the same length, different content.
+    let g1 = doc.generation();
+    src.replace(b"aaa 1\nbbb 2\nccc 3\nddd 4\neee 5\n".to_vec());
+    doc.refresh();
+    wait_until("second rewrite noticed", || doc.generation() > g1);
+    wait_ready(&doc, 30);
+    assert_eq!(
+        lines_of(&doc),
+        ["aaa 1", "bbb 2", "ccc 3", "ddd 4", "eee 5"]
+    );
+}
+
+#[test]
+fn rewrite_of_a_real_file_to_a_larger_size_is_detected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rw.log");
+    std::fs::write(&path, b"first old\nsecond old\n").unwrap();
+    let doc = Document::open(&path, OpenOptions::default()).unwrap();
+    wait_ready(&doc, 21);
+    let g0 = doc.generation();
+    // `>` redirect: same inode, truncated and refilled with more data.
+    let new = b"fresh 1\nfresh 2\nfresh 3\nfresh 4\n";
+    std::fs::write(&path, new).unwrap();
+    doc.refresh();
+    wait_until("rewrite noticed", || doc.generation() > g0);
+    wait_ready(&doc, new.len() as u64);
+    assert_eq!(lines_of(&doc), ["fresh 1", "fresh 2", "fresh 3", "fresh 4"]);
+}
+
+/// Follow-by-name: the path is gone (renamed away, not recreated) but the
+/// writer keeps appending to the old file through its handle.
+#[test]
+fn growth_of_a_renamed_away_file_is_still_followed() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("moved.log");
+    std::fs::write(&path, b"one\ntwo\n").unwrap();
+    let doc = Document::open(&path, OpenOptions::default()).unwrap();
+    wait_ready(&doc, 8);
+    let renamed = dir.path().join("moved.log.1");
+    std::fs::rename(&path, &renamed).unwrap();
+    wait_until("removal noticed", || doc.snapshot().file_missing);
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&renamed)
+        .unwrap();
+    f.write_all(b"three\nfour\n").unwrap();
+    f.flush().unwrap();
+    doc.refresh();
+    wait_ready(&doc, 19);
+    assert!(doc.snapshot().file_missing, "still reported as missing");
+    assert_eq!(lines_of(&doc), ["one", "two", "three", "four"]);
+}
