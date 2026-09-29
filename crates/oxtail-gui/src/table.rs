@@ -241,6 +241,7 @@ pub fn draw_header(
         ),
     );
     let mut drag_target: Option<f32> = None;
+    let strip = ui.interact(g.rect, id.with("strip"), Sense::click());
 
     // Pass 1: cells in display order; unpinned first so pinned ones paint over.
     let order: Vec<&Placement> = g
@@ -359,8 +360,8 @@ pub fn draw_header(
             }
         }
     }
-    // The empty strip right of the last column also has the menu.
-    let strip = ui.interact(g.rect, id.with("strip"), Sense::click());
+    // The empty strip right of the last column also has the menu (registered
+    // before the cells, which are drawn over it).
     strip.context_menu(|ui| columns_menu(ui, schema, layout, &mut events));
     // Drop indicator while dragging a header cell.
     if let Some(x) = drag_target {

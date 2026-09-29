@@ -211,10 +211,12 @@ impl OxTailApp {
                 }
                 TabAction::Close(i) => close = Some(i),
                 TabAction::CloseOthers(keep) => {
-                    let keep_id = self.tabs[keep].id;
+                    let Some(keep_id) = self.tabs.get(keep).map(|t| t.id) else {
+                        continue;
+                    };
                     let others: Vec<u64> = strip
                         .iter()
-                        .map(|&j| self.tabs[j].id)
+                        .filter_map(|&j| self.tabs.get(j).map(|t| t.id))
                         .filter(|id| *id != keep_id)
                         .collect();
                     for id in others {
@@ -245,7 +247,9 @@ impl OxTailApp {
     ) {
         self.dragging_tab = None;
         let Some(p) = pointer else { return };
-        let tab_id = self.tabs[from].id;
+        let Some(tab_id) = self.tabs.get(from).map(|t| t.id) else {
+            return;
+        };
         let target = self
             .pane_rects
             .iter()
