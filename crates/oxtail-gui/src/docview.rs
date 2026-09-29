@@ -804,9 +804,15 @@ impl DocView {
         }
     }
 
-    fn insert_lines(&mut self, generation: u64, lines: Vec<Line>) {
+    fn insert_lines(&mut self, generation: u64, mut lines: Vec<Line>) {
         if let Some(end) = lines.iter().map(|l| l.offset + l.len).max() {
             self.max_end = self.max_end.max(end);
+        }
+        // A reply to a request sent before indexing finished can arrive after
+        // `drop_inexact` ran; keeping its estimated numbers would leave them
+        // estimated for good. Drop them so the rows are read again, exactly.
+        if self.was_exact {
+            lines.retain(|l| l.number_exact);
         }
         self.cache.insert(generation, lines);
     }
@@ -1902,6 +1908,27 @@ mod tests {
         let space = v.scroll_space(&vis);
         v.scroll_to_thumb(1.0, space);
         assert!(v.follow);
+    }
+
+    #[test]
+    fn late_estimated_lines_are_not_cached_after_indexing() {
+        // Windows CI: a read sent before indexing finished answered after it,
+        // and its estimated numbers stayed in the cache forever.
+        let (doc, _mem) = doc_with(50);
+        let mut v = DocView::new(doc, &init(false));
+        run_until(&mut v, |v, vis| {
+            v.snapshot.lines.exact && vis.rows.len() == 10
+        });
+        let mut late = (*v.last_rows[3]).clone();
+        late.number_exact = false;
+        let offset = late.offset;
+        let g = v.cache.generation();
+        v.insert_lines(g, vec![late]);
+        assert!(v.cache.get(offset).unwrap().number_exact);
+        let vis = run_until(&mut v, |_, vis| {
+            vis.rows.len() == 10 && vis.rows.iter().all(|r| r.line.number_exact)
+        });
+        assert_eq!(numbers(&vis), (0..10).collect::<Vec<_>>());
     }
 
     #[test]
