@@ -1,0 +1,21 @@
+[package]
+name = "oxtail-gui"
+description = "egui front end for OxTail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+oxtail-core = { workspace = true }
+oxtail-search = { workspace = true }
+oxtail-highlight = { workspace = true }
+oxtail-columns = { workspace = true }
+oxtail-time = { workspace = true }
+oxtail-config = { workspace = true }
+eframe = { workspace = true }
+tracing = { workspace = true }

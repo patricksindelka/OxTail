@@ -1,0 +1,22 @@
+[package]
+name = "oxtail-cli"
+description = "OxTail: a fast, portable, real-time log viewer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+oxtail-gui = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+lexopt = { workspace = true }
+
+[[bin]]
+name = "oxtail"
+path = "src/main.rs"

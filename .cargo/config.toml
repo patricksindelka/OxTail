@@ -1,0 +1,9 @@
+# Static C runtime on Windows so the portable .exe needs no VC++ redistributable (PLAN.md §3.1).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[alias]
+xtask = "run -q -p xtask --"

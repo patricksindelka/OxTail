@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/oxtail-data
+*.log.tmp
