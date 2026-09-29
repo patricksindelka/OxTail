@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 mod detect;
 mod group;
+mod query;
 mod error;
 mod level;
 mod model;
@@ -9,6 +10,7 @@ mod parsers;
 mod quantity;
 mod timestamp;
 pub use error::ColumnsError;
+pub use query::*;
 pub use detect::*;
 pub use group::*;
 pub use level::{Level, normalize_level};

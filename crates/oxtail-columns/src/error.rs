@@ -26,6 +26,7 @@ impl From<regex::Error> for ColumnsError {
             .find(|l| !l.trim().is_empty())
             .unwrap_or("unknown error")
             .trim()
+            .trim_start_matches("error: ")
             .to_string();
         ColumnsError::Regex(msg)
     }
