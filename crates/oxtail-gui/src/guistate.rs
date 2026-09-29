@@ -129,7 +129,7 @@ mod tests {
         let back = GuiState::parse(&s.to_bytes());
         assert_eq!(back.structures, s.structures);
         assert_eq!(back.merged, s.merged);
-        assert_eq!(back.structure(Path::new("/a.log")).unwrap().table, true);
+        assert!(back.structure(Path::new("/a.log")).unwrap().table);
         // Most recently set comes first; updating moves to the front.
         assert_eq!(back.structures[0].0, "/b.log");
     }

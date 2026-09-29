@@ -863,6 +863,35 @@ fn handle_pointer(
             view.select_all();
             ui.close();
         }
+        if let Some(parser) = view.st.parser.clone() {
+            ui.separator();
+            let rec = view.selected_record().and_then(|(_, p)| p.record.clone());
+            if ui
+                .add_enabled(rec.is_some(), egui::Button::new("Copy record as JSON"))
+                .clicked()
+                && let Some(r) = &rec
+            {
+                ui.ctx()
+                    .copy_text(crate::detail::record_json(parser.schema(), r));
+                ui.close();
+            }
+            if ui
+                .add_enabled(rec.is_some(), egui::Button::new("Copy record as CSV"))
+                .clicked()
+                && let Some(r) = &rec
+            {
+                ui.ctx()
+                    .copy_text(crate::detail::record_csv(parser.schema(), r));
+                ui.close();
+            }
+            if ui
+                .checkbox(&mut view.detail_open, "Detail pane")
+                .on_hover_text("Show the selected record as key/value pairs")
+                .clicked()
+            {
+                ui.close();
+            }
+        }
         ui.separator();
         if ui
             .add_enabled(selected, egui::Button::new("Toggle bookmark"))

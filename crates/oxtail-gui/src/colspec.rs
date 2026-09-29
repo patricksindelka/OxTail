@@ -24,7 +24,10 @@
 
 use std::collections::BTreeMap;
 
-use oxtail_columns::{ColumnKind, FixedColumn, Parser, ParserSpec, Schema};
+use oxtail_columns::{
+    ColumnKind, FixedColumn, Parser, ParserSpec, Schema, discover_json_columns,
+    discover_logfmt_columns,
+};
 use oxtail_config::TimezoneSetting;
 use oxtail_time::jiff::tz::TimeZone;
 use oxtail_time::{TimeContext, TimeParser, TimestampFormat};
@@ -41,6 +44,9 @@ pub struct ColumnsConfig {
     pub needs_fields_line: bool,
     /// Delimited with `has_header`: the names come from the first line.
     pub needs_header_line: Option<char>,
+    /// logfmt / JSON Lines with `*` in `order`: the columns are the named
+    /// ones that occur in the sample plus every other key found there.
+    pub discover: bool,
 }
 
 /// Parses the `columns` table of a profile.
@@ -72,16 +78,23 @@ pub fn columns_from_table(t: &toml::Table) -> Result<ColumnsConfig, String> {
         order,
         needs_fields_line: false,
         needs_header_line: None,
+        discover: false,
     };
     match parser.as_str() {
-        "logfmt" => cfg.candidates.push(ParserSpec::Logfmt {
-            columns: known,
-            kinds,
-        }),
-        "jsonl" | "json" | "jsonlines" | "ndjson" => cfg.candidates.push(ParserSpec::JsonLines {
-            columns: known,
-            kinds,
-        }),
+        "logfmt" => {
+            cfg.discover = names.is_empty() && cfg.order.iter().any(|o| o == "*");
+            cfg.candidates.push(ParserSpec::Logfmt {
+                columns: known,
+                kinds,
+            });
+        }
+        "jsonl" | "json" | "jsonlines" | "ndjson" => {
+            cfg.discover = names.is_empty() && cfg.order.iter().any(|o| o == "*");
+            cfg.candidates.push(ParserSpec::JsonLines {
+                columns: known,
+                kinds,
+            });
+        }
         "nginx_combined" | "apache_combined" | "combined" | "access_combined" => {
             cfg.candidates.push(ParserSpec::AccessCombined);
         }
@@ -222,6 +235,19 @@ impl ColumnsConfig {
     /// parser.
     pub fn resolve(&self, sample: &[&str]) -> Result<(ParserSpec, Parser), String> {
         let mut specs: Vec<ParserSpec> = self.candidates.clone();
+        if self.discover {
+            for spec in &mut specs {
+                match spec {
+                    ParserSpec::Logfmt { columns, .. } => {
+                        *columns = merge_discovered(columns, discover_logfmt_columns(sample));
+                    }
+                    ParserSpec::JsonLines { columns, .. } => {
+                        *columns = merge_discovered(columns, discover_json_columns(sample));
+                    }
+                    _ => {}
+                }
+            }
+        }
         if self.needs_fields_line {
             let found = sample
                 .iter()
@@ -251,6 +277,25 @@ impl ColumnsConfig {
         }
         best.map(|(_, s, p)| (s, p)).ok_or(last_err)
     }
+}
+
+/// The named columns that occur in `found`, then every other found key.
+/// With nothing found the named columns are kept as they are.
+fn merge_discovered(named: &[String], found: Vec<String>) -> Vec<String> {
+    if found.is_empty() {
+        return named.to_vec();
+    }
+    let mut out: Vec<String> = named
+        .iter()
+        .filter(|n| found.contains(n))
+        .cloned()
+        .collect();
+    for f in found {
+        if !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    out
 }
 
 /// Orders the columns of `schema` by `order` (names may use aliases; `*` marks
@@ -384,7 +429,22 @@ order = ["time", "level", "msg", "*"]"#,
             }
             other => panic!("{other:?}"),
         }
+        // `*` in the order: every other key of the sample becomes a column too.
+        assert!(cfg.discover);
         let (_, parser) = cfg.resolve(&["time=1 level=info msg=hi extra=1"]).unwrap();
+        assert_eq!(parser.schema().len(), 4);
+        assert!(parser.schema().find("extra").is_some());
+        // Named columns that the sample does not have are dropped (`time`, `msg`).
+        let (_, parser) = cfg.resolve(&["ts=1 level=info took=5"]).unwrap();
+        let names: Vec<&str> = parser
+            .schema()
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["level", "ts", "took"]);
+        // Nothing to discover from: the named columns stay.
+        let (_, parser) = cfg.resolve(&[]).unwrap();
         assert_eq!(parser.schema().len(), 3);
     }
 
