@@ -157,7 +157,7 @@ impl Parsed {
             } => {
                 let (y, m, d) = match date {
                     DateSpec::Full(y, m, d) => (*y, *m, *d),
-                    DateSpec::NoYear(m, d) => (ctx.reference_year, *m, *d),
+                    DateSpec::NoYear(m, d) => (no_year_resolve(ctx, *m, *d), *m, *d),
                     DateSpec::None => (
                         ctx.reference_date.year(),
                         ctx.reference_date.month(),
@@ -171,6 +171,18 @@ impl Parsed {
                 }
             }
         }
+    }
+}
+
+/// Year for a month/day without year: the reference year, unless that puts
+/// the date more than about a day after the reference date (a log spanning
+/// New Year, opened in January, holds December lines from last year).
+fn no_year_resolve(ctx: &TimeContext, m: i8, d: i8) -> i16 {
+    let y = ctx.reference_year;
+    let limit = ctx.reference_date.tomorrow().unwrap_or(ctx.reference_date);
+    match (Date::new(y, m, d), y.checked_sub(1)) {
+        (Ok(date), Some(prev)) if date > limit && Date::new(prev, m, d).is_ok() => prev,
+        _ => y,
     }
 }
 
@@ -1021,5 +1033,32 @@ mod tests {
         );
         assert_eq!(detect("order 1700000000 shipped"), None);
         assert_eq!(detect("bytes=1700000000 ok"), None);
+    }
+
+    #[test]
+    fn syslog_no_year_across_new_year() {
+        let tz = TimeZone::UTC;
+        let ctx = TimeContext::with_reference_date(tz.clone(), Date::new(2026, 1, 2).expect("d"));
+        let dec = detect("Dec 31 23:59:59 host app: x").expect("d");
+        let ts = dec.format.parse("Dec 31 23:59:59", &ctx).expect("parse");
+        let want = tz
+            .to_timestamp(DateTime::new(2025, 12, 31, 23, 59, 59, 0).expect("dt"))
+            .expect("ts");
+        assert_eq!(ts, want);
+        // January lines stay in the reference year, also "tomorrow" (clock skew).
+        let jan = TimestampFormat::Syslog
+            .parse("Jan  2 00:00:01", &ctx)
+            .expect("p");
+        let want = tz
+            .to_timestamp(DateTime::new(2026, 1, 2, 0, 0, 1, 0).expect("dt"))
+            .expect("ts");
+        assert_eq!(jan, want);
+        let jan3 = TimestampFormat::Syslog
+            .parse("Jan  3 00:00:01", &ctx)
+            .expect("p");
+        let want = tz
+            .to_timestamp(DateTime::new(2026, 1, 3, 0, 0, 1, 0).expect("dt"))
+            .expect("ts");
+        assert_eq!(jan3, want);
     }
 }
