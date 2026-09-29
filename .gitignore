@@ -5,3 +5,4 @@
 /fuzz/artifacts
 /oxtail-data
 *.log.tmp
+/.claude/worktrees
