@@ -49,6 +49,11 @@ fn bad_arguments_exit_with_status_2() {
     }
 }
 
+// Hiding the display by removing DISPLAY/WAYLAND_DISPLAY only works on
+// X11/Wayland systems. On macOS and Windows (CI runners have a desktop
+// session) the binary would open a real window and run until the job
+// timeout, so these two tests are limited to those systems.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn without_a_display_every_renderer_fails_cleanly() {
     let dir = tempfile::tempdir().unwrap();
@@ -69,6 +74,11 @@ fn without_a_display_every_renderer_fails_cleanly() {
     assert!(dir.path().join("oxtail.log").is_file());
 }
 
+// Hiding the display by removing DISPLAY/WAYLAND_DISPLAY only works on
+// X11/Wayland systems. On macOS and Windows (CI runners have a desktop
+// session) the binary would open a real window and run until the job
+// timeout, so these two tests are limited to those systems.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn a_forced_renderer_is_tried_alone() {
     let dir = tempfile::tempdir().unwrap();
