@@ -246,3 +246,21 @@ fn lone_cr_is_recognised_once_a_second_line_arrives() {
     });
     assert_eq!(lines_of(&doc), ["a", "b", "c"]);
 }
+
+/// A line with no ending, then two lone CRs: a classic-Mac file with an empty
+/// second line, so two lines (found by `document_agrees_with_naive_lines`,
+/// whose LF-only model had counted one).
+#[test]
+fn lone_crs_appended_to_a_bare_line_are_two_lines() {
+    let src = Arc::new(MemSource::new(b"a".to_vec()));
+    let doc = Document::from_source(src.clone(), "cr");
+    wait_ready(&doc, 1);
+    src.append(b"\r\r");
+    doc.refresh();
+    wait_until("cr mode", || doc.snapshot().line_ending == LineEnding::Cr);
+    wait_until("spooled view ready", || {
+        let s = doc.snapshot();
+        s.utf8_len == 3 && s.lines.exact
+    });
+    assert_eq!(lines_of(&doc), ["a", ""]);
+}

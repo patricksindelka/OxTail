@@ -433,11 +433,16 @@ proptest! {
         extra in data_strategy(),
     ) {
         // Force UTF-8 so the encoding detector stays out of the picture; lone-CR
-        // detection still applies, so only plain-LF inputs are compared.
+        // detection still applies, so only plain-LF inputs are compared. It
+        // runs again after the append while the first sample was short, so
+        // judge the grown file too: "a" + "\r\r" is a classic-Mac file.
         let first = if data.is_empty() { &extra } else { &data };
         let has_lf = first.contains(&b'\n');
         let has_cr = first.contains(&b'\r');
         prop_assume!(has_lf || !has_cr);
+        let grown = [&data[..], &extra[..]].concat();
+        let cr_before_end = grown[..grown.len().saturating_sub(1)].contains(&b'\r');
+        prop_assume!(grown.contains(&b'\n') || !cr_before_end);
         let src = Arc::new(MemSource::new(data.clone()));
         let doc = Document::from_source_with(src.clone(), "p", OpenOptions {
             index_spacing: spacing,
