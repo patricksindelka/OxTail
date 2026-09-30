@@ -53,8 +53,20 @@ try {
         }
         "Trusting root for verification: $($root.Subject) ($($root.Thumbprint))"
     }
+    # signtool only says it cannot load the .pfx. .NET opens it the same way
+    # (CryptoAPI on Windows) and says why: a wrong password or a format it
+    # cannot read. A trailing line break (`echo pw | gh secret set`) is dropped.
+    $pw = $env:WINDOWS_CERT_PASSWORD -replace '[\r\n]+$', ''
+    $certs = [Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+    try { $certs.Import($pfx, $pw, 'EphemeralKeySet') }
+    catch { throw "cannot open the .pfx (WINDOWS_CERT_PFX_BASE64 with WINDOWS_CERT_PASSWORD): $($_.Exception.GetBaseException().Message)" }
+    $signer = $certs | Where-Object HasPrivateKey | Select-Object -First 1
+    if (-not $signer) { throw 'the .pfx holds no certificate with its private key' }
+    $eku = ($signer.Extensions | Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] }).EnhancedKeyUsages |
+        ForEach-Object { $_.FriendlyName }
+    "Signing certificate: $($signer.Subject); key $($signer.PublicKey.Oid.FriendlyName); usage: $($eku -join ', '); valid until $($signer.NotAfter.ToString('yyyy-MM-dd')); $($certs.Count) certificate(s) in the .pfx"
     foreach ($f in $Files) {
-        & $signtool.FullName sign /fd sha256 /f $pfx /p $env:WINDOWS_CERT_PASSWORD /tr $ts /td sha256 /d 'OxTail' $f
+        & $signtool.FullName sign /fd sha256 /f $pfx /p $pw /tr $ts /td sha256 /d 'OxTail' $f
         if ($LASTEXITCODE -ne 0) { throw "signtool failed for $f" }
         & $signtool.FullName verify /pa $f
         if ($LASTEXITCODE -ne 0) { throw "signature verification failed for $f" }
