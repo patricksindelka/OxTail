@@ -141,8 +141,6 @@ jobs:
           desktop-file-validate packaging/linux/$id.desktop
           appstreamcli validate --no-net packaging/linux/$id.metainfo.xml \
             || echo "::warning::appstreamcli reported problems (see log); fix before a Flathub submission"
-          grep -q "release version=\"$VERSION\"" packaging/linux/$id.metainfo.xml \
-            || echo "::warning::metainfo.xml has no <release> entry for $VERSION"
 
           name="oxtail-$VERSION-x86_64-linux"
           mkdir -p "dist/$name"

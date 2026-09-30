@@ -31,7 +31,7 @@ some_cmd | oxtail -                     # view standard input
 | `--integrate` | Register OxTail with the system ("Open with" entry, Start menu shortcut or desktop entry), print what was done and exit. See [Integration and updates](install.md#integration-and-updates). |
 | `--remove-integration` | Undo `--integrate` exactly, print what was removed and exit. Does nothing if OxTail is not integrated. |
 | `--check-update` | Ask GitHub whether a newer release exists (needs `curl`), print the result (newer, up to date, or no release published yet) and exit. |
-| `-V`, `--version` | Print the version (`oxtail 0.0.1`) and exit. |
+| `-V`, `--version` | Print the version (for example `oxtail 1.2.0`; `0.0.0-dev` for a build not made from a release) and exit. |
 | `-h`, `--help` | Print the usage text and exit. |
 
 Values can be given as `--lines 500`, `--lines=500` or, for short options, `-n500`.

@@ -6,7 +6,7 @@ manager manifests (PLAN.md 3.3, M6). Layout:
 | Path | Purpose |
 |---|---|
 | `../.github/workflows/ci.yml` | Builds, tests and packages every push; publishes on `v*` tags |
-| `version.sh` | Resolves the version (and checks it against the tag) for the workflow |
+| `version.sh` | Resolves the version for the workflow; on a tag, writes the tag's version into `Cargo.toml`, `Cargo.lock` and the metainfo |
 | `icons/` | App icon: `oxtail.svg`, PNGs, `oxtail.ico`, `oxtail.icns`. `make_icons.py` regenerates the raster files from the geometry in `crates/oxtail-gui/src/icon.rs` (there is no other icon source) |
 | `linux/` | `.desktop` file, AppStream metainfo, `nfpm.yaml` (deb and rpm) |
 | `windows/` | `oxtail.wxs` (WiX 3 MSI source), `sign.ps1` (signtool wrapper) |
@@ -20,19 +20,26 @@ The application id (bundle id, Flatpak id, desktop file name, AppStream id) is
 
 ## Cutting a release
 
-1. Bump `version` in the root `Cargo.toml` (`[workspace.package]`) and add a
-   `<release version="X.Y.Z" date="...">` entry to
-   `linux/io.github.patricksindelka.OxTail.metainfo.xml`. Commit.
-2. Start a full CI run first: Actions, "CI", "Run workflow", keep "full" ticked.
+The release tag is the only place a version is set. The repository's version
+stays `0.0.0-dev` (root `Cargo.toml`, `[workspace.package]`); builds that are
+not made from a tag report it, and their update check is off. On a `vX.Y.Z`
+tag, `version.sh` writes X.Y.Z into `Cargo.toml`, `Cargo.lock` and a
+`<release>` entry of `linux/io.github.patricksindelka.OxTail.metainfo.xml`
+before anything is built. Nothing is committed back.
+
+1. Start a full CI run first: Actions, "CI", "Run workflow", keep "full" ticked.
    It tests on all three platforms and builds every package as workflow artifacts
    (`oxtail-Linux`, `oxtail-Windows`, `oxtail-macOS`) without publishing. Ordinary
    pushes only run Linux checks, to save Actions minutes (macOS minutes count 10x,
    Windows 2x on private repositories).
-3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. CI runs in full on
-   the tag (`version.sh` fails if the tag differs from the crate version), then
-   the `publish` job creates the GitHub Release (pre-release if the version
-   contains `-`) with all packages, `SHA256SUMS` and the rendered manifests
-   (`oxtail-X.Y.Z-manifests.tar.gz`). Only tags publish.
+2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z` (or `vX.Y.Z-rc.1` for
+   a pre-release). CI runs in full on the tag, then the `publish` job creates the
+   GitHub Release (pre-release if the version contains `-`) with all packages,
+   `SHA256SUMS` and the rendered manifests (`oxtail-X.Y.Z-manifests.tar.gz`).
+   Only tags publish.
+3. Optionally, record the release in the repository's metainfo (the tag build
+   adds its entry, but only to the packages it builds), and update the `tag:` in
+   `flatpak/io.github.patricksindelka.OxTail.yml` before a Flathub submission.
 4. Submit the package manager manifests by hand from that archive (see below).
 
 ## Artifacts

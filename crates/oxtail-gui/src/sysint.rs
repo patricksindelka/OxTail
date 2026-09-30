@@ -52,7 +52,9 @@ impl SystemBackend for ConfigBackend {
         update::check_latest(current)
     }
     fn check_due(&self, dd: &DataDir) -> bool {
-        update::check_due(dd)
+        // A development build is never compared with releases (it would
+        // always be older), so its automatic check never runs.
+        !update::is_dev_build(env!("CARGO_PKG_VERSION")) && update::check_due(dd)
     }
     fn record_check(&self, dd: &DataDir) -> Result<(), ConfigError> {
         update::record_check(dd)

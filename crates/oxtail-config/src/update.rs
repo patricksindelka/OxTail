@@ -40,6 +40,10 @@ pub const LATEST_URL: &str = "https://api.github.com/repos/patricksindelka/OxTai
 pub const THROTTLE_FILE: &str = "update-check.json";
 /// Minimum time between automatic checks.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// The version of builds not made from a release tag: the repository keeps it
+/// and the release workflow replaces it with the tag's version
+/// (`packaging/version.sh`).
+pub const DEV_VERSION: &str = "0.0.0-dev";
 /// Answers larger than this are refused (memory stays bounded).
 const MAX_ANSWER_BYTES: u64 = 1_000_000;
 /// Release notes are cut to this many characters.
@@ -80,8 +84,24 @@ pub fn check_latest(current_version: &str) -> Result<Option<Release>, ConfigErro
     })
 }
 
+/// `true` for a development build ([`DEV_VERSION`], or any `-dev` version).
+/// Every release is newer than it, so it is not compared with releases: the
+/// automatic check skips it and a manual check says why.
+pub fn is_dev_build(version: &str) -> bool {
+    version.ends_with("-dev")
+}
+
 /// Like [`check_latest`], but distinguishes "no release published yet".
+///
+/// # Errors
+/// Also [`ConfigError::Update`] for a development build ([`is_dev_build`]),
+/// without asking the network.
 pub fn check_latest_detailed(current_version: &str) -> Result<LatestCheck, ConfigError> {
+    if is_dev_build(current_version) {
+        return Err(ConfigError::Update(format!(
+            "this is a development build ({current_version}); only release builds check for updates"
+        )));
+    }
     match fetch_latest() {
         Ok(json) => Ok(match parse_release(&json, current_version)? {
             Some(r) => LatestCheck::Newer(r),
@@ -388,6 +408,18 @@ mod tests {
         }
         assert!(!newer("1.0", "1.0.0"));
         assert!(!newer("1.0.0+build5", "1.0.0"));
+    }
+
+    #[test]
+    fn development_builds_are_not_compared() {
+        assert!(is_dev_build(DEV_VERSION));
+        assert!(is_dev_build("1.2.0-dev"));
+        assert!(!is_dev_build("0.0.2"));
+        assert!(!is_dev_build("0.0.3-rc.1"));
+        // Answered without the network, and says why.
+        let err = check_latest_detailed(DEV_VERSION).unwrap_err().to_string();
+        assert!(err.contains("development build"), "{err}");
+        assert!(check_latest(DEV_VERSION).is_err());
     }
 
     #[test]
