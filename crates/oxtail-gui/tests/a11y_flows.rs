@@ -79,8 +79,16 @@ fn visible_rows_are_a_list_with_their_text_and_line_numbers() {
         options[0].accesskit_node().description().as_deref(),
         Some(format!("Line {}", first + 1).as_str())
     );
-    // Selection shows up as the selected state of the rows.
+    // Selection shows up as the selected state of the rows. Select all once
+    // the whole file is indexed and its end is loaded: earlier, select_all
+    // selects nothing or only the lines known so far (slow runners, CI run 26).
+    step_until(&mut h, "whole file loaded", |a| {
+        a.active_view().is_some_and(|v| {
+            v.snapshot.lines.exact && v.cache.last_line_ending_at(v.snapshot.utf8_len).is_some()
+        })
+    });
     h.state_mut().active_view_mut().unwrap().select_all();
+    assert!(h.state().active_view().unwrap().selection.is_some());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         h.step();

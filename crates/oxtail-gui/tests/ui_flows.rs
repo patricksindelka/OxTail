@@ -270,6 +270,29 @@ fn tabs_can_be_switched_and_closed_from_the_keyboard() {
 }
 
 #[test]
+fn a_tab_switch_chord_does_not_also_move_egui_focus() {
+    // egui reads Shift+Tab with the literal Ctrl key (not `command`, as macOS
+    // reports it) as "focus the previous widget". Switching tabs with it then
+    // focused a widget of the old tab, and the accessibility tree named a
+    // focus it did not hold (CI run 26, macos-latest).
+    let mut app = new_app();
+    app.open_document("a.log", doc_from(sample(50)));
+    app.open_document("b.log", doc_from(sample(60)));
+    let mut h = harness(app);
+    h.step();
+    let ctrl_shift = Modifiers {
+        ctrl: true,
+        shift: true,
+        ..Modifiers::NONE
+    };
+    h.key_press_modifiers(ctrl_shift, Key::Tab);
+    h.step();
+    h.step();
+    assert_eq!(h.state().active_tab().unwrap().title, "a.log");
+    assert_eq!(h.ctx.memory(|m| m.focused()), None);
+}
+
+#[test]
 fn go_to_line_dialog_jumps() {
     let mut app = new_app();
     app.open_document("sample.log", doc_from(sample(1000)));

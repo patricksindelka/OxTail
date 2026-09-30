@@ -694,16 +694,17 @@ mod tests {
         let a = Arc::new(Document::from_source(mem_a.clone(), "a.log"));
         let b = Arc::new(Document::from_source(mem_b.clone(), "b.log"));
         let store = Arc::new(MergedStore::default());
-        // A quiet source holds the others back only for the idle delay; 30 ms
-        // was shorter than a slow runner takes to notice a's new line (CI run
-        // 15, macos-latest), so b1 got merged first. 2 s keeps the ordering
-        // under test deterministic.
+        // A quiet source holds the others back only for the idle delay,
+        // counted from when it went live. So append while `a` is still inside
+        // it: right after a0 is merged, while b0 waits for `a`. Waiting for b0
+        // first meant waiting out the delay, after which b1 could be merged
+        // before a1 was noticed (CI runs 15 and 26, macos-latest).
         let opts = MergeOptions {
-            idle_delay: Duration::from_secs(2),
+            idle_delay: Duration::from_secs(5),
             ..opts()
         };
         let _w = MergeWorker::start(vec![a, b], Arc::clone(&store), opts, Arc::new(|| {}));
-        wait_len(&store, 2);
+        wait_len(&store, 1);
         mem_b.append(ts_line(3, "b1").as_bytes());
         mem_a.append(ts_line(2, "a1").as_bytes());
         wait_len(&store, 4);

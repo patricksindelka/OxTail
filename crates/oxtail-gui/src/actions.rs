@@ -182,6 +182,13 @@ impl OxTailApp {
                 }
             }
         });
+        // A chord the app handled is not also egui's focus navigation: on
+        // macOS the literal Ctrl is not `command`, so egui reads Ctrl+Shift+Tab
+        // as Shift+Tab and would focus a widget of the tab being switched away
+        // from (the accessibility tree then names a focus it does not hold).
+        if !actions.is_empty() {
+            ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+        }
         for a in actions {
             self.perform(a, ctx);
         }
