@@ -201,7 +201,8 @@ jobs:
           candle -nologo -arch x64 "-dVersion=$env:NUMERIC_VERSION" "-dBinDir=dist\stage" "-dIconDir=packaging\icons" `
             -out dist\oxtail.wixobj packaging\windows\oxtail.wxs
           if ($LASTEXITCODE -ne 0) { throw 'candle failed' }
-          light -nologo -out $msi dist\oxtail.wixobj
+          # -spdb: no .wixpdb (a debug file) next to the MSI, where it would be released.
+          light -nologo -spdb -out $msi dist\oxtail.wixobj
           if ($LASTEXITCODE -ne 0) { throw 'light failed' }
           if ($env:WINDOWS_CERT_PFX_BASE64) { ./packaging/windows/sign.ps1 $msi }
           # ProductCode for the winget manifest.
