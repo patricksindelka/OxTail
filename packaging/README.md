@@ -80,6 +80,7 @@ on macOS the app is then only ad-hoc signed, which is required for arm64 to run.
 |---|---|---|
 | `WINDOWS_CERT_PFX_BASE64` | Base64 of the code-signing `.pfx` (`base64 -w0 cert.pfx`) | signtool signs `oxtail.exe` (before zip and MSI) and the MSI |
 | `WINDOWS_CERT_PASSWORD` | Password of the `.pfx` | same |
+| `WINDOWS_CERT_ROOT_BASE64` | Optional: base64 of the root certificate (PEM or DER) when the `.pfx` comes from a private CA such as step-ca | trusted on the runner while signing, so `signtool verify` passes; Windows trusts the result only where that root is installed |
 | `MACOS_CERT_P12_BASE64` | Base64 of the "Developer ID Application" certificate exported as `.p12` | codesign of the app (hardened runtime) and the DMG |
 | `MACOS_CERT_PASSWORD` | Password of the `.p12` | same |
 | `MACOS_SIGN_IDENTITY` | Identity name, e.g. `Developer ID Application: Name (TEAMID)` | codesign |
