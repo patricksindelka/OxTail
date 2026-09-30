@@ -1105,7 +1105,7 @@ mod tests {
         ] {
             let c = Chord::from_event(key, mods, false);
             assert!(k.lookup(key, mods).is_some());
-            assert!(!c.works_in_text_fields(), "{c}");
+            assert!(!c.works_in_text_fields_for(false), "{c}");
         }
         for (key, mods) in [
             (Key::F, m(true, false, false)),
@@ -1116,7 +1116,7 @@ mod tests {
             (Key::P, m(true, true, false)),
         ] {
             assert!(
-                Chord::from_event(key, mods, false).works_in_text_fields(),
+                Chord::from_event(key, mods, false).works_in_text_fields_for(false),
                 "{key:?}"
             );
         }
@@ -1130,7 +1130,7 @@ mod tests {
             (Key::F, NONE),
         ] {
             assert!(
-                !Chord::from_event(key, mods, false).works_in_text_fields(),
+                !Chord::from_event(key, mods, false).works_in_text_fields_for(false),
                 "{key:?}"
             );
         }

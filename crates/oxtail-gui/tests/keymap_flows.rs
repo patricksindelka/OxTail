@@ -194,14 +194,14 @@ fn less_q_does_nothing() {
 fn a_user_binding_replaces_the_preset_chord() {
     let mut h = view_of(app_with(|s| {
         s.custom_keybindings
-            .insert("search.find".into(), "Ctrl+K".into());
+            .insert("search.find".into(), "Mod+K".into());
     }));
     h.key_press_modifiers(Modifiers::COMMAND, Key::F);
     h.step();
     h.step();
     assert!(!h.state().active_view().unwrap().find.open);
     h.key_press_modifiers(Modifiers::COMMAND, Key::K);
-    step_until(&mut h, "find via Ctrl+K", |a| {
+    step_until(&mut h, "find via Mod+K", |a| {
         a.active_view().is_some_and(|v| v.find.open)
     });
     assert!(
@@ -354,7 +354,15 @@ fn alt_chords_that_type_a_character_do_not_fire_in_a_text_field() {
     input.modifiers = Modifiers::NONE;
     h.step();
     assert_eq!(h.state().settings().wrap, wrap);
-    // Without the text event Alt+Z is the command (proves the setup).
+    // Without the text event Alt+Z is the command (proves the setup). On
+    // macOS Option+letter always types, so it never fires in a text field.
     h.key_press_modifiers(Modifiers::ALT, Key::Z);
-    step_until(&mut h, "wrap toggled", |a| a.settings().wrap != wrap);
+    if host_is_mac() {
+        for _ in 0..4 {
+            h.step();
+        }
+        assert_eq!(h.state().settings().wrap, wrap);
+    } else {
+        step_until(&mut h, "wrap toggled", |a| a.settings().wrap != wrap);
+    }
 }

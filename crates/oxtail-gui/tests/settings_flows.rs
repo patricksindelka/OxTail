@@ -230,7 +230,7 @@ fn a_shortcut_can_be_recorded_and_reset() {
             .keymap()
             .shortcut_text(oxtail_gui::keymap::Action::Mark)
             .as_deref(),
-        Some("Ctrl+Alt+K")
+        Some(shown("Alt+K").as_str())
     );
     // The new chord works, the old one is gone.
     assert!(
@@ -427,7 +427,7 @@ fn the_start_screen_offers_the_ways_to_open_and_lists_the_keys() {
     h.get_by_label("Open folder\u{2026}");
     h.get_by_label("Paste from clipboard");
     h.get_by_label("Files you open will appear here.");
-    h.get_by_label("Ctrl+Shift+P");
+    h.get_by_label(&shown("Shift+P"));
     h.get_by_label("Search every command");
 }
 

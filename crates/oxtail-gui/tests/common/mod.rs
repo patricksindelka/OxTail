@@ -10,7 +10,14 @@ use oxtail_config::DataDir;
 use oxtail_core::{Document, MemSource};
 use oxtail_gui::{AppInit, ExternalOpen, OpenRequest, OxTailApp, load_startup};
 
+pub use oxtail_gui::keymap::host_is_mac;
+
 pub const CTRL: Modifiers = Modifiers::COMMAND;
+
+/// A `Mod+…` shortcut as the running platform shows it (`Cmd` on macOS).
+pub fn shown(rest: &str) -> String {
+    format!("{}+{rest}", if host_is_mac() { "Cmd" } else { "Ctrl" })
+}
 
 /// An app with in-memory configuration (nothing is written).
 pub fn new_app() -> OxTailApp {

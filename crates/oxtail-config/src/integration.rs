@@ -481,7 +481,13 @@ fn shortcut_path_ok(p: &Path) -> bool {
 
 /// The changes to make. Pure: no I/O.
 fn plan(platform: Platform, exe: &Path, env: &Env, id: &str) -> Result<Vec<Change>, ConfigError> {
-    if !exe.is_absolute() {
+    // Absolute by the rules of the platform being planned for, which is the
+    // host except in tests.
+    let absolute = match platform {
+        Platform::Unix | Platform::MacOs => exe.to_string_lossy().starts_with('/'),
+        Platform::Windows => exe.is_absolute() || shortcut_path_ok(exe),
+    };
+    if !absolute {
         return Err(ConfigError::Integration(format!(
             "the executable path must be absolute: {}",
             exe.display()
@@ -1082,7 +1088,7 @@ mod tests {
 
     #[test]
     fn windows_plan_adds_open_with_but_no_default() {
-        let exe = PathBuf::from("/c/Tools/oxtail.exe");
+        let exe = PathBuf::from("C:\\Tools\\oxtail.exe");
         let home = Path::new("/c/Users/u/AppData/Roaming");
         let changes = plan(Platform::Windows, &exe, &env(home), "ID").unwrap();
         let exe_s = exe.to_string_lossy();
@@ -1164,6 +1170,9 @@ mod tests {
     fn plan_rejects_relative_exe_line_breaks_and_macos() {
         let e = env(Path::new("/h"));
         assert!(plan(Platform::Unix, Path::new("oxtail"), &e, "i").is_err());
+        assert!(plan(Platform::Windows, Path::new("oxtail.exe"), &e, "i").is_err());
+        assert!(plan(Platform::Windows, Path::new("\\Tools\\oxtail.exe"), &e, "i").is_err());
+        assert!(plan(Platform::Windows, Path::new("D:/Tools/oxtail.exe"), &e, "i").is_ok());
         assert!(plan(Platform::MacOs, Path::new("/x/oxtail"), &e, "i").is_err());
         assert!(plan(Platform::Unix, Path::new("/x/ox\ntail"), &e, "i").is_err());
         let none = Env {

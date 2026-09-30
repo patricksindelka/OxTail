@@ -11,6 +11,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use oxtail_config::DataDir;
 use oxtail_core::{Document, MemSource};
+use oxtail_gui::keymap::host_is_mac;
 use oxtail_gui::{AppInit, ExternalOpen, OpenRequest, OxTailApp, load_startup};
 
 const CTRL: Modifiers = Modifiers::COMMAND;
@@ -243,9 +244,11 @@ fn tabs_can_be_switched_and_closed_from_the_keyboard() {
     h.step();
     assert_eq!(h.state().tab_count(), 3);
     assert_eq!(h.state().active_tab().unwrap().title, "c.log");
+    // The literal Control key: egui also reports it as `command`, except on
+    // macOS, where Cmd is a separate key.
     let ctrl_only = Modifiers {
         ctrl: true,
-        command: true,
+        command: !host_is_mac(),
         ..Modifiers::NONE
     };
     h.key_press_modifiers(ctrl_only, Key::Tab);
