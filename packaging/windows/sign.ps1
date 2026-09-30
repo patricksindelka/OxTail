@@ -1,19 +1,42 @@
 # Signs the given files with signtool using a PFX from the environment.
 # Env: WINDOWS_CERT_PFX_BASE64 (base64 of the .pfx), WINDOWS_CERT_PASSWORD,
 #      WINDOWS_TIMESTAMP_URL (optional, defaults to DigiCert),
-#      WINDOWS_CERT_ROOT_BASE64 (optional: base64 of the root certificate, PEM
-#      or DER, of a private CA such as step-ca; trusted on this machine while
-#      signing so the signature can be verified).
+#      WINDOWS_CERT_ROOT_BASE64 (optional: the root certificate of a private CA
+#      such as step-ca, as PEM text or base64 of a PEM or DER file; trusted on
+#      this machine while signing so the signature can be verified).
 # Usage: pwsh packaging/windows/sign.ps1 dist\stage\oxtail.exe dist\oxtail.msi
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Files)
 $ErrorActionPreference = 'Stop'
+
+# Decodes a base64 secret, ignoring line breaks and spaces (wrapped `base64`
+# output); the error names the secret but never shows its value. The functions
+# return `,$bytes` so PowerShell does not unroll the byte[] into object[].
+function ConvertFrom-SecretBase64([string]$Name) {
+    $v = [Environment]::GetEnvironmentVariable($Name) -replace '\s', ''
+    try { return , [Convert]::FromBase64String($v) }
+    catch { throw "$Name is not valid base64 ($($v.Length) characters); set it to the output of: base64 -w0 <file>" }
+}
+
+# The root certificate as DER bytes: from PEM text pasted as is, or from base64
+# of a PEM or DER file.
+function Get-RootCertBytes([string]$Name) {
+    $pem = '-----BEGIN CERTIFICATE-----([^-]+)-----END CERTIFICATE-----'
+    $raw = [Environment]::GetEnvironmentVariable($Name)
+    if ($raw -notmatch $pem) {
+        $raw = [Text.Encoding]::ASCII.GetString((ConvertFrom-SecretBase64 $Name))
+        if ($raw -notmatch $pem) { return , (ConvertFrom-SecretBase64 $Name) }
+    }
+    try { return , [Convert]::FromBase64String(($Matches[1] -replace '\s', '')) }
+    catch { throw "$Name holds a malformed PEM certificate" }
+}
+
 if (-not $env:WINDOWS_CERT_PFX_BASE64) { throw 'WINDOWS_CERT_PFX_BASE64 is not set' }
 $ts = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
 $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
     Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
 if (-not $signtool) { throw 'signtool.exe not found (Windows SDK missing)' }
 $pfx = Join-Path $env:RUNNER_TEMP 'oxtail-codesign.pfx'
-[IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+[IO.File]::WriteAllBytes($pfx, (ConvertFrom-SecretBase64 'WINDOWS_CERT_PFX_BASE64'))
 # A private CA's root is not trusted by Windows, so `verify /pa` below would
 # fail. Trust it for the duration (LocalMachine: adding to CurrentUser\Root
 # opens a confirmation dialog, which would hang a headless runner).
@@ -21,12 +44,7 @@ $rootStore = $null
 $addedRoot = $null
 try {
     if ($env:WINDOWS_CERT_ROOT_BASE64) {
-        $bytes = [Convert]::FromBase64String($env:WINDOWS_CERT_ROOT_BASE64)
-        $text = [Text.Encoding]::ASCII.GetString($bytes)
-        if ($text -match '-----BEGIN CERTIFICATE-----([^-]+)-----END CERTIFICATE-----') {
-            $bytes = [Convert]::FromBase64String(($Matches[1] -replace '\s', ''))
-        }
-        $root = [Security.Cryptography.X509Certificates.X509Certificate2]::new($bytes)
+        $root = [Security.Cryptography.X509Certificates.X509Certificate2]::new((Get-RootCertBytes 'WINDOWS_CERT_ROOT_BASE64'))
         $rootStore = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
         $rootStore.Open('ReadWrite')
         if ($rootStore.Certificates.Find('FindByThumbprint', $root.Thumbprint, $false).Count -eq 0) {
