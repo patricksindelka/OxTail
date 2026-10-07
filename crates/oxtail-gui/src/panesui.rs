@@ -467,6 +467,7 @@ impl OxTailApp {
         let now = Instant::now();
         let colors = self.colors.clone();
         let env_epoch = self.style_epoch;
+        let pacer = std::sync::Arc::clone(&self.pacer);
         let (font_size, line_height, line_numbers, gap) = (
             self.settings.font_size,
             self.settings.line_height,
@@ -511,6 +512,7 @@ impl OxTailApp {
             minimap: false,
             style_epoch: env_epoch,
             gap_secs: gap,
+            pacer: Some(&pacer),
         };
         egui::CentralPanel::no_frame().show(ui, |ui| {
             mergepaint::show(ui, Id::new(("merged", tab_id)), mv, &env);

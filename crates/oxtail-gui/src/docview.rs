@@ -878,8 +878,10 @@ impl DocView {
             out.repaint = true;
         }
 
+        // This frame draws what the events bring (the pump runs before the
+        // rows are laid out): no extra repaint. Replies to the requests they
+        // trigger wake the UI themselves.
         while let Ok(ev) = self.doc.events().try_recv() {
-            out.repaint = true;
             self.on_event(ev);
         }
         // Events may have bumped the generation.
@@ -1212,6 +1214,8 @@ impl DocView {
         {
             self.follow = true;
             self.resume_on_bottom = false;
+            // The status bar was drawn before this: show "following" next frame.
+            self.repaint_after = Some(Duration::ZERO);
         }
 
         self.request_missing(&space, &vis, view_rows);

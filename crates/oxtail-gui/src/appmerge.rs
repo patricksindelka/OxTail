@@ -116,6 +116,7 @@ impl OxTailApp {
         );
         let tx = self.msg_sender();
         let wake = self.waker();
+        let doc_wake = self.doc_waker();
         let spawned = std::thread::Builder::new()
             .name("oxtail-open-merge".into())
             .spawn(move || {
@@ -125,7 +126,7 @@ impl OxTailApp {
                     match Document::open(p, opts.clone()) {
                         Ok(d) => {
                             let d = Arc::new(d);
-                            let w = Arc::clone(&wake);
+                            let w = Arc::clone(&doc_wake);
                             d.set_waker(Box::new(move || w()));
                             sources.push(MergeSource {
                                 name: name.clone(),

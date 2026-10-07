@@ -62,6 +62,9 @@ pub struct ViewEnv<'a> {
     /// Show a separator between rows further apart than this many seconds
     /// (`0` disables).
     pub gap_secs: f64,
+    /// Paces the view's own delayed repaints like the document's (see
+    /// [`crate::pacer`]); `None` repaints when asked.
+    pub pacer: Option<&'a crate::pacer::WakePacer>,
 }
 
 // ------------------------------------------------------------------ galleys
@@ -532,7 +535,10 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     view.last_heights = vis.rows.iter().map(|r| r.height).collect();
     view.hbar_rect = None;
     if let Some(d) = view.repaint_after.take() {
-        ctx.request_repaint_after(d);
+        match env.pacer {
+            Some(p) => p.wake_after(&ctx, d),
+            None => ctx.request_repaint_after(d),
+        }
     }
 
     // Horizontal scroll range.
@@ -561,6 +567,11 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         }
     }
     if !table {
+        // A wider line came into view: the horizontal bar appears next frame.
+        let bar_now = !view.wrap && widest + PAD * 2.0 > text_w;
+        if bar_now && !need_hbar {
+            ctx.request_repaint_after(crate::pacer::ONE_FRAME);
+        }
         view.max_text_w = widest;
     } else if fill_seen > view.fill_chars || cont_seen > view.cont_chars {
         // A wider line came into view: widen the table now, and lay out the

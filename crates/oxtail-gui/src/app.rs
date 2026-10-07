@@ -126,6 +126,8 @@ pub struct OxTailApp {
     next_tab_id: u64,
     msg_tx: Sender<AppMsg>,
     msg_rx: Receiver<AppMsg>,
+    /// Paces the repaints documents ask for while their tabs follow.
+    pub(crate) pacer: Arc<crate::pacer::WakePacer>,
     persist_rx: Receiver<PersistResult>,
     persist_tx: Sender<PersistResult>,
     persist: Option<Persist>,
@@ -236,6 +238,7 @@ impl OxTailApp {
             next_tab_id: 1,
             msg_tx,
             msg_rx,
+            pacer: crate::pacer::WakePacer::new(),
             persist_rx,
             persist_tx,
             persist: None,
@@ -342,6 +345,42 @@ impl OxTailApp {
                 Arc::new(move || ctx.request_repaint())
             }
             None => Arc::new(|| {}),
+        }
+    }
+
+    /// The waker for documents: like [`Self::waker`], but paced while every
+    /// visible view follows its end (see [`crate::pacer`]).
+    pub(crate) fn doc_waker(&self) -> Arc<dyn Fn() + Send + Sync> {
+        match &self.ctx {
+            Some(ctx) => {
+                let ctx = ctx.clone();
+                let pacer = Arc::clone(&self.pacer);
+                Arc::new(move || pacer.wake(&ctx))
+            }
+            None => Arc::new(|| {}),
+        }
+    }
+
+    /// Whether document repaints are paced (every visible view follows).
+    pub fn repaints_paced(&self) -> bool {
+        self.pacer.is_paced()
+    }
+
+    /// Paces document repaints only while every visible view follows. Runs
+    /// before and after drawing: drawing can stop following (wheel, minimap,
+    /// scrollbar), and a reply deferred meanwhile then needs a frame.
+    pub(crate) fn update_pacing(&self, ctx: &Context) {
+        let following = self.panes.panes().iter().all(|&p| {
+            self.active_index_in_pane(p)
+                .and_then(|i| self.tabs.get(i))
+                .is_none_or(|t| match (t.view(), t.merged()) {
+                    (Some(v), _) => v.follow,
+                    (None, Some(m)) => m.follow,
+                    (None, None) => true,
+                })
+        });
+        if self.pacer.set_paced(following) {
+            ctx.request_repaint_after(crate::pacer::ONE_FRAME);
         }
     }
 
@@ -492,13 +531,14 @@ impl OxTailApp {
         }
         let tx = self.msg_tx.clone();
         let wake = self.waker();
+        let doc_wake = self.doc_waker();
         let spawned = std::thread::Builder::new()
             .name("oxtail-open".into())
             .spawn(move || {
                 let result = Document::open(&path, opts)
                     .map(|d| {
                         let d = Arc::new(d);
-                        let w = Arc::clone(&wake);
+                        let w = Arc::clone(&doc_wake);
                         d.set_waker(Box::new(move || w()));
                         d
                     })
@@ -527,6 +567,7 @@ impl OxTailApp {
         self.select_tab(self.tabs.len() - 1);
         let tx = self.msg_tx.clone();
         let wake = self.waker();
+        let doc_wake = self.doc_waker();
         let spool = self.data_dir.tmp_dir();
         let spawned = std::thread::Builder::new()
             .name("oxtail-open-stdin".into())
@@ -534,7 +575,7 @@ impl OxTailApp {
                 let result = Document::from_stdin(spool.as_deref())
                     .map(|d| {
                         let d = Arc::new(d);
-                        let w = Arc::clone(&wake);
+                        let w = Arc::clone(&doc_wake);
                         d.set_waker(Box::new(move || w()));
                         d
                     })
@@ -560,7 +601,7 @@ impl OxTailApp {
         tab.pane = self.focused_pane;
         self.tabs.push(tab);
         self.select_tab(self.tabs.len() - 1);
-        let w = self.waker();
+        let w = self.doc_waker();
         doc.set_waker(Box::new(move || w()));
         self.finish_open(id, Ok(doc));
         id
@@ -899,6 +940,7 @@ impl OxTailApp {
         self.handle_zoom(ctx);
         self.handle_keys(ctx);
         self.periodic(ctx, now);
+        self.update_pacing(ctx);
     }
 
     fn drain_messages(&mut self, ctx: &Context) {
