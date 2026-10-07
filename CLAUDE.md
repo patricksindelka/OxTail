@@ -7,3 +7,5 @@
   crate, the PLAN.md sections, the public API it must expose, and the check commands.
 - Before handing work back, run the `verify` skill.
 - For large features, first have `reviewer` check the diff, then fix what it finds.
+- Commit directly to `main` and push it. This project does not use branches or
+  pull requests.
