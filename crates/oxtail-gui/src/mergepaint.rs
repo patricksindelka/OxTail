@@ -80,7 +80,9 @@ pub fn show(ui: &mut Ui, id: Id, mv: &mut MergedView, env: &ViewEnv<'_>) {
     );
     let hbar_rect = Rect::from_min_max(pos2(text_left, bottom), pos2(text_right, full.bottom()));
     if ui.rect_contains_pointer(full) {
-        let d = ui.input(|i| i.smooth_scroll_delta);
+        let d = ui.input(|i| {
+            crate::wheel::input_wheel_delta(i, row_h, (body.height() - row_h).max(row_h))
+        });
         if d.y != 0.0 {
             if need_hbar && ui.rect_contains_pointer(hbar_rect) {
                 // The plain wheel over the horizontal bar scrolls sideways.

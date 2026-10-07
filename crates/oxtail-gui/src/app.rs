@@ -290,6 +290,12 @@ impl OxTailApp {
         self.started = true;
         self.ctx = Some(ctx.clone());
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        // A log viewer should feel instant: no fading menus, popups and
+        // windows, no eased scrolling in scroll areas.
+        ctx.all_styles_mut(|s| {
+            s.animation_time = 0.0;
+            s.scroll_animation = egui::style::ScrollAnimation::none();
+        });
         if let Ok(mut slot) = self.external.ctx_slot.lock() {
             *slot = Some(ctx.clone());
         }
@@ -1652,11 +1658,15 @@ pub fn native_options(
             .with_position([w.x, w.y])
             .with_maximized(w.maximized);
     }
-    eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport,
         renderer,
         ..Default::default()
-    }
+    };
+    // eframe queues two frames by default (high throughput); one keeps input
+    // and drawing a frame closer together, which is what a viewer needs.
+    options.wgpu_options.surface = eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY;
+    options
 }
 
 /// Most files opened from one dropped folder.
