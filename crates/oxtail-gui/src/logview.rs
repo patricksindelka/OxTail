@@ -431,7 +431,9 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     let hovered = ui.rect_contains_pointer(full);
     let hbar_rect = rect_between(pos2(full.left(), bottom), pos2(text_right, full.bottom()));
     if hovered {
-        let delta = ui.input(|i| i.smooth_scroll_delta);
+        let delta = ui.input(|i| {
+            crate::wheel::input_wheel_delta(i, row_h, (text_rect.height() - row_h).max(row_h))
+        });
         let over_hbar = need_hbar && ui.rect_contains_pointer(hbar_rect);
         if delta.y != 0.0 {
             if over_hbar {

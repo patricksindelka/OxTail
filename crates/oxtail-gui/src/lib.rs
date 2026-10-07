@@ -108,6 +108,7 @@ pub mod timeview;
 pub mod util;
 pub mod viewport;
 pub mod welcome;
+pub mod wheel;
 
 pub use app::{OxTailApp, native_options};
 pub use request::OpenRequest;
