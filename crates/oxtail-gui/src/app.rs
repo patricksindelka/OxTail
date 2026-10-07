@@ -1665,6 +1665,10 @@ impl eframe::App for OxTailApp {
         self.show(ui);
     }
 
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::wheel::take_raw_wheel(ctx, raw_input);
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.shutdown();
     }

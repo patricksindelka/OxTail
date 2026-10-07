@@ -7,3 +7,4 @@
 *.log.tmp
 /.claude/worktrees
 /docs/book/book
+/vendor/eframe/Cargo.lock

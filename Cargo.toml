@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "xtask"]
+exclude = ["vendor"]
 default-members = ["crates/*"]
 
 [workspace.package]
@@ -168,3 +169,10 @@ opt-level = "s"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# eframe with one patch: frames identical to the last one painted are not
+# painted again (vendor/eframe/src/native/skip_paint.rs). Moving the mouse
+# runs egui frames that draw nothing new; painting them took a CPU core with
+# software rasterizers. Upgrading eframe means re-applying the patch.
+[patch.crates-io]
+eframe = { path = "vendor/eframe" }

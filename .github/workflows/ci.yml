@@ -94,6 +94,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --no-fail-fast --locked
+      - name: Test the eframe patch (vendor/eframe, outside the workspace)
+        if: runner.os == 'Linux'
+        run: cargo test --manifest-path vendor/eframe/Cargo.toml --lib skip_paint --target-dir target
 
       # --------------------------------------------------------- release build
       - name: Build (Linux, glibc ${{ env.GLIBC_BASELINE }})
