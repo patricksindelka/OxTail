@@ -1,5 +1,6 @@
 //! The app reacts in the frame the input arrives: wheel notches are not eased
-//! over several frames, and menus and windows do not fade in.
+//! over several frames, and menus and windows do not fade in. While it only
+//! follows a growing file, it redraws at a paced rate.
 
 mod common;
 
@@ -50,4 +51,30 @@ fn nothing_animates() {
     let style = h.ctx.global_style();
     assert_eq!(style.animation_time, 0.0);
     assert_eq!(style.scroll_animation.duration.max, 0.0);
+}
+
+#[test]
+fn repaints_are_paced_only_while_following() {
+    let mut app = new_app();
+    app.open_document("sample.log", doc_from(logfmt_sample(500)));
+    let mut h = harness(app);
+    step_until(&mut h, "rows", |a| {
+        a.active_view().is_some_and(|v| v.last_rows.len() > 5)
+    });
+    assert!(h.state().active_view().unwrap().follow);
+    assert!(h.state().repaints_paced(), "following: paced");
+    // A wheel turn up stops following while the view is drawn; pacing ends
+    // in that same frame, so the replies it asks for show at once.
+    h.event(Event::PointerMoved(pos2(400.0, 200.0)));
+    h.step();
+    assert!(h.state().repaints_paced(), "hovering changes nothing");
+    h.event(Event::MouseWheel {
+        unit: MouseWheelUnit::Line,
+        delta: vec2(0.0, 2.0),
+        modifiers: Modifiers::NONE,
+        phase: TouchPhase::Move,
+    });
+    h.step();
+    assert!(!h.state().active_view().unwrap().follow);
+    assert!(!h.state().repaints_paced(), "browsing: not paced");
 }

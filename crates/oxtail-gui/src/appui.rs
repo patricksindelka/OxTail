@@ -31,6 +31,7 @@ impl OxTailApp {
         self.drop_overlay_for_tabs(&ctx);
         self.windows_ui(&ctx);
         drop_overlay(&ctx);
+        self.update_pacing(&ctx);
     }
 
     fn update_title(&mut self, ctx: &Context) {
@@ -364,6 +365,7 @@ impl OxTailApp {
                 profiles,
                 history,
                 style_epoch,
+                pacer,
                 ..
             } = self;
             let Some(tab) = tabs.get_mut(index) else {
@@ -412,6 +414,7 @@ impl OxTailApp {
                 minimap: settings.show_minimap,
                 style_epoch: *style_epoch,
                 gap_secs: settings.time_gap_threshold_secs,
+                pacer: Some(pacer),
             };
             egui::CentralPanel::no_frame().show(ui, |ui| {
                 logview::show(ui, Id::new(("log", tab_id)), view, &env);

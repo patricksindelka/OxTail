@@ -84,6 +84,7 @@ pub mod mergefilter;
 pub mod mergepaint;
 pub mod mergeview;
 pub mod minimap;
+pub mod pacer;
 pub mod palette;
 pub mod panels;
 pub mod panes;
