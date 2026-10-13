@@ -28,7 +28,9 @@ use crate::minimap::{bin_matches, bin_of, bin_points, click_fraction, intensity}
 use crate::panels::{a11y_item, a11y_list, a11y_role, a11y_scrollbar, pointer_sense};
 use crate::scroll::{Row, Visible};
 use crate::sort::{MINIMAP_REFRESH, MINIMAP_WORK_CAP, position_bins};
-use crate::table::{CELL_PAD, CellKey, HEADER_EXTRA, HeaderGeometry, SortHeader, draw_header};
+use crate::table::{
+    CELL_PAD, CellKey, FilterMark, HEADER_EXTRA, HeaderGeometry, SortHeader, draw_header,
+};
 use crate::tablepaint::{TableRow, WrapSpec, paint_table_row, wrapped_row_height};
 use crate::text::{JobOptions, build_job, clean_ranges, compose};
 use crate::timeview::{REL_CHARS, RelMode, format_gap, gap_between, relative_label};
@@ -356,6 +358,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     let table = view.table_active();
     if !table {
         view.header_cells.clear();
+        view.value_menu = None;
     }
     let header_h = if table { row_h + HEADER_EXTRA } else { 0.0 };
     let outer = ui.available_rect_before_wrap();
@@ -807,9 +810,15 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
     }
     view.tcache = tcache;
     if table {
-        // Column separators.
+        // Column separators, along the record rows only.
         let sep = mix32(colors.background, colors.border, 0.6);
         let body = painter.with_clip_rect(text_rect);
+        let spans = separator_spans(
+            vis.rows
+                .iter()
+                .zip(&laid)
+                .map(|(row, (p, _))| (row.y, row.y + row.height, p.record.is_some())),
+        );
         for p in &placements {
             let x = text_left + p.x + p.w - if p.pinned { 0.0 } else { view.h_scroll };
             let min_x = if p.pinned {
@@ -818,7 +827,13 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                 text_left + pinned_w
             };
             if x >= min_x && x <= text_right {
-                body.vline(x - 0.5, text_rect.y_range(), Stroke::new(1.0, sep));
+                for &(top, bottom) in &spans {
+                    body.vline(
+                        x - 0.5,
+                        text_rect.top() + top..=text_rect.top() + bottom,
+                        Stroke::new(1.0, sep),
+                    );
+                }
             }
         }
         // Header.
@@ -835,6 +850,18 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                 .collect();
             let offer = view.sort_offer();
             let note = sort_note(view);
+            let filter_marks: Vec<FilterMark> = parser
+                .schema()
+                .columns
+                .iter()
+                .map(|c| {
+                    crate::valuefilter::mark(
+                        &c.name,
+                        c.kind,
+                        !view.filter.column_values(&c.name).is_empty(),
+                    )
+                })
+                .collect();
             let sort_header = SortHeader {
                 active: view.sort.spec,
                 offer: &offer,
@@ -853,6 +880,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                 char_w,
                 placements: &placements,
                 sort: &sort_header,
+                filters: &filter_marks,
             };
             let events = draw_header(
                 ui,
@@ -873,6 +901,10 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                         crate::table::HeaderEvent::Sort(col, choice) => {
                             view.choose_sort(*col, *choice);
                         }
+                        crate::table::HeaderEvent::FilterValues(col, anchor) => {
+                            view.value_menu =
+                                crate::valuefilter::toggle(view.value_menu, *col, *anchor);
+                        }
                         _ => {}
                     }
                 }
@@ -891,6 +923,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                             e,
                             crate::table::HeaderEvent::Resize(..)
                                 | crate::table::HeaderEvent::Sort(..)
+                                | crate::table::HeaderEvent::FilterValues(..)
                                 | crate::table::HeaderEvent::Autofit(..)
                         )
                     }) {
@@ -908,6 +941,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
                 CornerRadius::ZERO,
                 colors.gutter_bg,
             );
+            crate::valuefilter::show(ui, id, view);
         }
     }
     if text_resp.has_focus() {
@@ -1029,6 +1063,27 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut DocView, env: &ViewEnv<'_>) {
         }
         resp.on_hover_text("Resume following (F)");
     }
+}
+
+/// The vertical extents `(top, bottom)` the column separators run along,
+/// from the rows' `(top, bottom, is_record)`: the record rows, with
+/// neighbouring ones joined. Continuation lines (stack traces and the like)
+/// span all columns, so the separators stop at them.
+fn separator_spans(rows: impl IntoIterator<Item = (f32, f32, bool)>) -> Vec<(f32, f32)> {
+    let mut spans: Vec<(f32, f32)> = Vec::new();
+    let mut joined = false;
+    for (top, bottom, record) in rows {
+        if !record {
+            joined = false;
+            continue;
+        }
+        match spans.last_mut() {
+            Some(last) if joined => last.1 = bottom,
+            _ => spans.push((top, bottom)),
+        }
+        joined = true;
+    }
+    spans
 }
 
 /// The minimum width in pixels of the table's fill column: what its longest
@@ -1625,6 +1680,22 @@ pub fn size_of_galley(g: &Galley) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_separators_stop_at_continuation_lines() {
+        // A record, a two-line stack trace, two records, a trailing line.
+        let rows = [
+            (0.0, 10.0, true),
+            (10.0, 20.0, false),
+            (20.0, 30.0, false),
+            (30.0, 40.0, true),
+            (40.0, 55.0, true),
+            (55.0, 65.0, false),
+        ];
+        assert_eq!(separator_spans(rows), vec![(0.0, 10.0), (30.0, 55.0)]);
+        assert!(separator_spans([(0.0, 10.0, false)]).is_empty());
+        assert!(separator_spans([]).is_empty());
+    }
 
     fn row(y: f32, h: f32) -> Row {
         Row {

@@ -132,6 +132,59 @@ pub fn equals_query(column: &str, value: &str) -> String {
     format!("{column}:\"{escaped}\"")
 }
 
+/// The query for "this column has one of these values" (the header's value
+/// filter): `column:"a"` or `column:("a"|"b")`. [`parse_values_query`] reads
+/// it back. Empty without values.
+pub fn values_query(column: &str, values: &[String]) -> String {
+    let quoted: Vec<String> = values
+        .iter()
+        .map(|v| format!("\"{}\"", v.replace('"', "\\\"")))
+        .collect();
+    match quoted.as_slice() {
+        [] => String::new(),
+        [one] => format!("{column}:{one}"),
+        many => format!("{column}:({})", many.join("|")),
+    }
+}
+
+/// The values of a [`values_query`] for `column`, or `None` when `text` is
+/// some other query.
+pub fn parse_values_query(column: &str, text: &str) -> Option<Vec<String>> {
+    let rest = text
+        .get(..column.len() + 1)
+        .filter(|p| p.eq_ignore_ascii_case(&format!("{column}:")))
+        .map(|_| &text[column.len() + 1..])?;
+    let (inner, many) = match rest.strip_prefix('(') {
+        Some(r) => (r.strip_suffix(')')?, true),
+        None => (rest, false),
+    };
+    let mut values = Vec::new();
+    let mut chars = inner.chars().peekable();
+    loop {
+        if chars.next()? != '"' {
+            return None;
+        }
+        let mut v = String::new();
+        loop {
+            match chars.next()? {
+                '"' => break,
+                '\\' if chars.peek() == Some(&'"') => {
+                    chars.next();
+                    v.push('"');
+                }
+                c => v.push(c),
+            }
+        }
+        values.push(v);
+        match chars.next() {
+            None => break,
+            Some('|') if many => {}
+            Some(_) => return None,
+        }
+    }
+    (many || values.len() == 1).then_some(values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +296,67 @@ mod tests {
         let line = b"ts=x level=info msg=\"say \\\"hi\\\"\" took=1";
         let q = equals_query("msg", "say \"hi\"");
         assert!(pred(&q, Some(c)).matches(line), "{q}");
+    }
+
+    #[test]
+    fn values_queries_filter_on_any_of_the_values() {
+        let c = logfmt();
+        let warn = b"ts=x level=warn msg=a took=1";
+        let info = b"ts=x level=info msg=b took=1";
+        let both = values_query("level", &["error".into(), "warn".into()]);
+        assert_eq!(both, "level:(\"error\"|\"warn\")");
+        assert!(pred(&both, Some(c.clone())).matches(A));
+        assert!(pred(&both, Some(c.clone())).matches(warn));
+        assert!(!pred(&both, Some(c.clone())).matches(info));
+        let one = values_query("level", &["info".into()]);
+        assert_eq!(one, "level:\"info\"");
+        assert!(pred(&one, Some(c)).matches(info));
+        assert_eq!(values_query("level", &[]), "");
+    }
+
+    #[test]
+    fn values_queries_are_told_apart_from_other_queries() {
+        let v = |s: &[&str]| Some(s.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(parse_values_query("level", "level:\"WARN\""), v(&["WARN"]));
+        assert_eq!(parse_values_query("level", "LEVEL:\"WARN\""), v(&["WARN"]));
+        assert_eq!(
+            parse_values_query("level", "level:(\"a|b\"|\"c)\")"),
+            v(&["a|b", "c)"])
+        );
+        for other in [
+            "",
+            "level:WARN",
+            "level:\"WARN\" took>1s",
+            "level:(\"WARN\"",
+            "level:(\"a\" | \"b\")",
+            "level:\"a\"|\"b\"",
+            "levels:\"WARN\"",
+            "msg:\"WARN\"",
+            "level:\"WARN",
+            "lé",
+        ] {
+            assert_eq!(parse_values_query("level", other), None, "{other}");
+        }
+    }
+
+    proptest::proptest! {
+        /// What the header writes, it reads back, and the parser accepts.
+        /// (A value ending in `\` cannot be quoted in the query language.)
+        #[test]
+        fn values_queries_round_trip(
+            values in proptest::collection::vec("[^\\\\]{0,12}", 1..5)
+        ) {
+            let q = values_query("level", &values);
+            proptest::prop_assert_eq!(parse_values_query("level", &q), Some(values));
+            proptest::prop_assert!(Query::parse(&q).is_ok(), "{}", q);
+        }
+
+        /// Arbitrary text never panics.
+        #[test]
+        fn parsing_values_queries_never_panics(s in "\\PC{0,30}") {
+            let _ = parse_values_query("level", &s);
+            let _ = parse_values_query("é", &s);
+        }
     }
 
     #[test]

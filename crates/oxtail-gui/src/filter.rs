@@ -35,7 +35,16 @@ use oxtail_search::{
 };
 
 use crate::find::QueryProblem;
-use crate::qfilter::{QueryContext, QueryPredicate, compile_query};
+use crate::qfilter::{
+    QueryContext, QueryPredicate, compile_query, parse_values_query, values_query,
+};
+
+/// The values of `e` when it is a column header value filter for `column`.
+fn values_entry(e: &FilterEntry, column: &str) -> Option<Vec<String>> {
+    (e.query && e.include)
+        .then(|| parse_values_query(column, &e.text))
+        .flatten()
+}
 
 /// How long typing must pause before the filter job restarts.
 pub const EDIT_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -430,6 +439,66 @@ impl FilterState {
         self.entries.iter().any(|e| e.enabled && !e.text.is_empty())
     }
 
+    /// The values the column header's value filter keeps for `column`
+    /// (empty when it has none, or the user switched it or the filtered view
+    /// off).
+    pub fn column_values(&self, column: &str) -> Vec<String> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        self.entries
+            .iter()
+            .filter(|e| e.enabled)
+            .find_map(|e| values_entry(e, column))
+            .unwrap_or_default()
+    }
+
+    /// Sets the column header's value filter for `column`: only rows whose
+    /// cell is one of `values` stay; no values remove it. The filter is one
+    /// column-query entry of the stack, edited in place (other enabled ones
+    /// for the column, say from the statistics panel, are merged into it).
+    /// Returns whether the entry is new.
+    pub fn set_column_values(&mut self, column: &str, values: &[String]) -> bool {
+        self.entries.retain(|e| !e.text.is_empty());
+        let is_values = |e: &FilterEntry| values_entry(e, column).is_some();
+        if values.is_empty() {
+            self.entries.retain(|e| !(e.enabled && is_values(e)));
+            self.changed();
+            return false;
+        }
+        let text = values_query(column, values);
+        let target = self
+            .entries
+            .iter()
+            .position(|e| e.enabled && is_values(e))
+            .or_else(|| self.entries.iter().position(is_values));
+        let added = match target {
+            Some(i) => {
+                self.entries[i].text = text;
+                self.entries[i].enabled = true;
+                false
+            }
+            None => {
+                self.entries.push(FilterEntry::column_query(text, true));
+                true
+            }
+        };
+        // The target is now the first enabled one; drop the others.
+        let mut kept = false;
+        self.entries.retain(|e| {
+            if e.enabled && is_values(e) {
+                if kept {
+                    return false;
+                }
+                kept = true;
+            }
+            true
+        });
+        self.enabled = true;
+        self.changed();
+        added
+    }
+
     /// Whether the filtered view is the one to show right now: a job exists
     /// and the user has not switched to the full view.
     pub fn view_active(&self) -> bool {
@@ -582,6 +651,53 @@ mod tests {
             assert!(Instant::now() < deadline, "filter did not finish");
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn the_header_value_filter_is_one_entry_edited_in_place() {
+        let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut f = FilterState::default();
+        f.entries.push(FilterEntry::include("timeout"));
+        f.entries.push(FilterEntry::default()); // a blank row being edited
+        f.enabled = false;
+        assert!(f.column_values("level").is_empty());
+        assert!(f.set_column_values("level", &s(&["WARN"])));
+        assert!(f.enabled);
+        assert_eq!(f.column_values("level"), s(&["WARN"]));
+        assert_eq!(f.entries.len(), 2);
+        assert!(!f.set_column_values("level", &s(&["WARN", "ERROR"])));
+        assert_eq!(f.column_values("level"), s(&["WARN", "ERROR"]));
+        assert_eq!(f.entries.len(), 2);
+        // Another column gets its own entry; the text filter is untouched.
+        assert!(f.set_column_values("host", &s(&["a"])));
+        assert_eq!(f.entries[0], FilterEntry::include("timeout"));
+        // Switched off in the panel: not shown as active, switched on again
+        // when values are picked.
+        f.entries[1].enabled = false;
+        assert!(f.column_values("level").is_empty());
+        assert!(!f.set_column_values("level", &s(&["INFO"])));
+        assert_eq!(f.column_values("level"), s(&["INFO"]));
+        // A value picked in the statistics panel adds a second entry; the
+        // header shows and edits the first, and merges the other into it.
+        f.entries
+            .push(FilterEntry::column_query("level:\"ERROR\"", true));
+        assert_eq!(f.column_values("level"), s(&["INFO"]));
+        f.set_column_values("level", &s(&["INFO", "WARN"]));
+        assert_eq!(f.entries.len(), 3);
+        assert_eq!(f.column_values("level"), s(&["INFO", "WARN"]));
+        // With the full view shown, the column counts as unfiltered, and
+        // removing the value filter does not switch the filtered view on.
+        f.enabled = false;
+        assert!(f.column_values("level").is_empty());
+        f.set_column_values("level", &[]);
+        assert!(!f.enabled);
+        f.enabled = true;
+        assert!(f.column_values("level").is_empty());
+        assert_eq!(f.entries.len(), 2);
+        // An exclude query for the column is not the header's filter.
+        f.entries
+            .push(FilterEntry::column_query("level:\"DEBUG\"", false));
+        assert!(f.column_values("level").is_empty());
     }
 
     #[test]

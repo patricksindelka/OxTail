@@ -107,6 +107,7 @@ pub mod tablepaint;
 pub mod text;
 pub mod timeview;
 pub mod util;
+pub mod valuefilter;
 pub mod viewport;
 pub mod welcome;
 pub mod wheel;

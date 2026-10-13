@@ -11,7 +11,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use egui::epaint::CornerRadius;
-use egui::{Align2, FontId, Galley, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{FontId, Galley, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
 use oxtail_columns::{ColumnKind, Schema};
 use oxtail_highlight::{Style, StyledSpan};
 
@@ -203,6 +203,45 @@ pub enum HeaderEvent {
     /// Sort the filtered view by the column with this *schema* index, or
     /// clear the sort.
     Sort(usize, SortChoice),
+    /// Open (or close) the value filter of the column with this *schema*
+    /// index, below this rectangle.
+    FilterValues(usize, Rect),
+}
+
+/// Whether a header cell offers the value filter (the funnel button).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterMark {
+    /// Not for this column (timestamps, JSON).
+    None,
+    /// Shown while the pointer is over the cell.
+    OnHover,
+    /// Always shown (a level column: the obvious one to filter on).
+    Always,
+    /// The column is being filtered: shown highlighted.
+    Active,
+}
+
+/// The funnel icon of the value filter, in `rect`.
+fn funnel_icon(painter: &egui::Painter, rect: Rect, color: egui::Color32) {
+    let c = rect.center();
+    let (w, h) = (5.0, 5.0);
+    let top = c.y - h * 0.6;
+    let neck = c.y + 0.5;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            pos2(c.x - w, top),
+            pos2(c.x + w, top),
+            pos2(c.x + 1.2, neck),
+            pos2(c.x - 1.2, neck),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+    painter.rect_filled(
+        Rect::from_min_max(pos2(c.x - 1.2, neck), pos2(c.x + 1.2, c.y + h * 0.7)),
+        CornerRadius::ZERO,
+        color,
+    );
 }
 
 /// What the header needs to know about sorting.
@@ -288,6 +327,8 @@ pub struct HeaderGeometry<'a> {
     pub placements: &'a [Placement],
     /// Sorting state and availability.
     pub sort: &'a SortHeader<'a>,
+    /// The value filter's mark, per *schema* column.
+    pub filters: &'a [FilterMark],
 }
 
 /// Draws the header and returns what the user did. `id` must be unique per
@@ -386,22 +427,80 @@ pub fn draw_header(
         } else {
             info.name.clone()
         };
-        cp.text(
-            pos2(x0 + CELL_PAD, cell.center().y),
-            Align2::LEFT_CENTER,
-            label,
-            font.clone(),
-            colors.text,
-        );
+        let galley = painter.layout_no_wrap(label, font.clone(), colors.text);
         cp.vline(
             cell.right() - 0.5,
             g.rect.y_range(),
             Stroke::new(1.0, colors.border),
         );
+        // The value filter's funnel at the right edge, left of the resize
+        // grab zone (registered after the cell, so it takes the clicks).
+        // Where it would cover the title, it only shows on hover (unless
+        // the column is filtered), and then the title is cut short.
+        let mark = g.filters.get(p.col).copied().unwrap_or(FilterMark::None);
+        let funnel_rect = Rect::from_center_size(
+            pos2(cell.right() - RESIZE_GRAB * 0.5 - 8.0, cell.center().y),
+            vec2(16.0, g.rect.height()),
+        );
+        let title_fits = x0 + CELL_PAD + galley.size().x + 2.0 <= funnel_rect.left();
+        let funnel_shown = match mark {
+            FilterMark::None => false,
+            FilterMark::Always if title_fits => true,
+            FilterMark::OnHover | FilterMark::Always => ui.rect_contains_pointer(visible),
+            FilterMark::Active => true,
+        } && cell.width() > 32.0
+            && visible.contains_rect(funnel_rect);
+        let title_clip = if funnel_shown {
+            Rect::from_min_max(
+                clip.min,
+                pos2(funnel_rect.left().min(clip.right()), clip.bottom()),
+            )
+        } else {
+            clip
+        };
+        painter.with_clip_rect(title_clip).galley(
+            pos2(x0 + CELL_PAD, cell.center().y - galley.size().y * 0.5),
+            galley,
+            colors.text,
+        );
+        let mut arrow_right = cell.right() - 2.0;
+        if funnel_shown {
+            arrow_right -= 16.0;
+            let fr = ui.interact(funnel_rect, id.with(("filter", p.col)), Sense::click());
+            fr.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    format!("Filter {} by value", info.name),
+                )
+            });
+            let active = mark == FilterMark::Active;
+            if fr.hovered() {
+                cp.rect_filled(
+                    funnel_rect.shrink2(vec2(1.0, 3.0)),
+                    CornerRadius::same(3),
+                    mix32(colors.gutter_bg, colors.text, 0.15),
+                );
+            }
+            let color = if active {
+                colors.accent
+            } else {
+                mix32(colors.gutter_bg, colors.text, 0.55)
+            };
+            funnel_icon(&cp, funnel_rect, color);
+            let fr = fr.on_hover_text(if active {
+                "Filtered by value. Click to change"
+            } else {
+                "Filter by value"
+            });
+            if fr.clicked() {
+                events.push(HeaderEvent::FilterValues(p.col, cell));
+            }
+        }
         if let Some(s) = sort.active.filter(|s| s.col == p.col) {
             sort_arrow(
                 &cp,
-                cell.right() - 2.0,
+                arrow_right,
                 cell.center().y,
                 s.descending,
                 colors.accent,
@@ -454,6 +553,10 @@ pub fn draw_header(
             }
             ui.separator();
             sort_menu(ui, p.col, sort, &mut events);
+            if mark != FilterMark::None && ui.button("Filter by value\u{2026}").clicked() {
+                events.push(HeaderEvent::FilterValues(p.col, cell));
+                ui.close();
+            }
             ui.separator();
             columns_menu(ui, schema, layout, &mut events);
         });
@@ -618,7 +721,7 @@ pub fn apply_events(
                 }
             }
             // Handled by the view, not the layout.
-            HeaderEvent::Sort(..) => continue,
+            HeaderEvent::Sort(..) | HeaderEvent::FilterValues(..) => continue,
         }
         changed = true;
     }

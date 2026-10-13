@@ -306,6 +306,10 @@ pub struct DocView {
     /// Header cells drawn in the last frame as `(schema column, screen
     /// rectangle)`; empty outside the table view (for tests).
     pub header_cells: Vec<(usize, egui::Rect)>,
+    /// The open value filter of a column header.
+    pub value_menu: Option<crate::valuefilter::ValueMenu>,
+    /// Column values seen while a value filter was open, by column name.
+    pub seen_values: HashMap<String, BTreeSet<String>>,
     /// The scrollbar thumb is being dragged at this position.
     pub thumb_drag: Option<f64>,
     /// Column structure: parser, table view, layout, time parser.
@@ -412,6 +416,8 @@ impl DocView {
             },
             last_rows: Vec::new(),
             header_cells: Vec::new(),
+            value_menu: None,
+            seen_values: HashMap::new(),
             thumb_drag: None,
             st: Structure::new(),
             tcache: TableCache::default(),

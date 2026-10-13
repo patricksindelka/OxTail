@@ -268,3 +268,45 @@ fn plain_java_in_all_themes() {
         shot(&mut h, &format!("70_java_plain_{tag}"));
     }
 }
+
+/// log4j lines with a stack trace after every error.
+fn java_with_traces(n: usize) -> String {
+    let mut out = String::new();
+    for (i, line) in java_sample(n).lines().enumerate() {
+        out.push_str(line);
+        out.push('\n');
+        if i % 8 == 3 {
+            out.push_str("java.lang.IllegalStateException: connection refused\n");
+            out.push_str("\tat app.service.Db.connect(Db.java:42)\n");
+            out.push_str("\tat app.service.Db.read(Db.java:17)\n");
+        }
+    }
+    out
+}
+
+#[test]
+#[ignore = "renders with wgpu; run with --ignored and SHOT_DIR"]
+fn value_filter_stack_traces_and_menus() {
+    for (theme, tag) in &THEMES[..2] {
+        let mut h = app_with(java_with_traces(300), 1280.0, 600.0);
+        h.state_mut().set_theme(*theme);
+        accept_columns(&mut h);
+        // Column separators stop at the stack trace lines.
+        shot(&mut h, &format!("80_table_traces_{tag}"));
+        // The level column's value filter, open, then with WARN selected.
+        h.get_by_label("Filter level by value").click();
+        shot(&mut h, &format!("81_value_filter_open_{tag}"));
+        h.get_by_label("WARN").click();
+        for _ in 0..100 {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        shot(&mut h, &format!("82_value_filter_warn_{tag}"));
+        h.key_press(Key::Escape);
+        // A menu is open; pointing at the next title opens that one.
+        h.get_by_label("File").click();
+        h.step();
+        h.get_by_label("Edit").hover();
+        shot(&mut h, &format!("83_menu_switch_{tag}"));
+    }
+}

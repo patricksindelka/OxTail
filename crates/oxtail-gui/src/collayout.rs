@@ -54,7 +54,8 @@ pub struct Placement {
 pub fn default_width(name: &str, kind: ColumnKind) -> f32 {
     match kind {
         ColumnKind::Timestamp => 24.0,
-        ColumnKind::Level => 7.0,
+        // "level" and the value filter's funnel.
+        ColumnKind::Level => 9.0,
         ColumnKind::Number => 9.0,
         ColumnKind::Duration | ColumnKind::Bytes => 10.0,
         ColumnKind::Json => 40.0,

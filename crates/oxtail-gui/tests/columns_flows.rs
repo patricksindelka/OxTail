@@ -231,6 +231,49 @@ fn statistics_count_values_and_a_click_adds_a_filter() {
 }
 
 #[test]
+fn the_level_header_filters_by_the_selected_values() {
+    let mut h = open_with_table(200);
+    // A level column always shows its funnel.
+    h.get_by_label("Filter level by value").click();
+    h.step();
+    h.step();
+    assert!(h.state().active_view().unwrap().value_menu.is_some());
+    h.get_by_label("ERROR").click();
+    step_until(&mut h, "only errors", |a| {
+        a.active_view()
+            .is_some_and(|v| v.is_filtered() && v.filter.status.done && v.filter.set.len() == 40)
+    });
+    // One column-query entry, edited in place as values are selected.
+    let v = h.state().active_view().unwrap();
+    assert_eq!(v.filter.column_values("level"), vec!["ERROR".to_string()]);
+    assert_eq!(v.filter.entries.len(), 1);
+    assert!(v.value_menu.is_some(), "the list stays open");
+    h.get_by_label("INFO").click();
+    step_until(&mut h, "errors and infos", |a| {
+        a.active_view()
+            .is_some_and(|v| v.filter.status.done && v.filter.set.len() == 200)
+    });
+    assert_eq!(
+        h.state()
+            .active_view()
+            .unwrap()
+            .filter
+            .column_values("level"),
+        vec!["INFO".to_string(), "ERROR".to_string()]
+    );
+    // "Show all rows" removes the filter again.
+    h.get_by_label("Show all rows").click();
+    h.step();
+    let v = h.state().active_view().unwrap();
+    assert!(v.filter.entries.is_empty());
+    assert!(v.filter.column_values("level").is_empty());
+    // A second click on the funnel closes the list.
+    h.get_by_label("Filter level by value").click();
+    h.step();
+    assert!(h.state().active_view().unwrap().value_menu.is_none());
+}
+
+#[test]
 fn exporting_writes_the_filtered_rows_and_selected_columns() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("out.csv");
