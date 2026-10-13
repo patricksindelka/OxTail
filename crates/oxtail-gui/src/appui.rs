@@ -95,8 +95,9 @@ impl OxTailApp {
     }
 
     fn menu_bar(&mut self, ui: &mut Ui, ctx: &Context) {
+        let mut bar = BarMenus::begin(ctx);
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
+            bar.menu(ui, "File", |ui| {
                 self.menu_item(ui, ctx, Action::Open);
                 self.menu_item(ui, ctx, Action::OpenFolder);
                 let recent = self.session.recent_files.clone();
@@ -144,7 +145,7 @@ impl OxTailApp {
                 self.menu_item(ui, ctx, Action::Settings);
                 self.menu_item(ui, ctx, Action::Quit);
             });
-            ui.menu_button("Edit", |ui| {
+            bar.menu(ui, "Edit", |ui| {
                 self.menu_item(ui, ctx, Action::Copy);
                 self.menu_item(ui, ctx, Action::CopyWithNumbers);
                 self.menu_item(ui, ctx, Action::SelectAll);
@@ -162,7 +163,7 @@ impl OxTailApp {
                 });
                 self.menu_item(ui, ctx, Action::Mark);
             });
-            ui.menu_button("View", |ui| {
+            bar.menu(ui, "View", |ui| {
                 self.menu_check(ui, ctx, Action::ToggleFollow);
                 self.menu_check(ui, ctx, Action::ToggleWrap);
                 self.menu_check(ui, ctx, Action::ToggleAnsi);
@@ -186,7 +187,7 @@ impl OxTailApp {
                 ui.separator();
                 self.menu_item(ui, ctx, Action::EditRules);
             });
-            ui.menu_button("Help", |ui| {
+            bar.menu(ui, "Help", |ui| {
                 self.menu_item(ui, ctx, Action::Palette);
                 self.menu_item(ui, ctx, Action::Shortcuts);
                 ui.separator();
@@ -194,6 +195,7 @@ impl OxTailApp {
                 self.menu_item(ui, ctx, Action::About);
             });
         });
+        bar.end(ctx);
     }
 
     /// The "Columns" submenu of the View menu.
@@ -728,4 +730,112 @@ fn drop_overlay(ctx: &Context) {
 /// Windows that exist, for tests.
 pub fn any_window_open(w: &Windows) -> bool {
     w.goto.is_some() || w.goto_time.is_some() || w.settings || w.shortcuts || w.about
+}
+
+/// The top-level menus of the menu bar. egui opens them on click only; like
+/// a native menu bar, while one of them is open, pointing at another title
+/// opens that one instead.
+struct BarMenus {
+    /// The bar's menu that was open when the frame began.
+    open: Option<Id>,
+    /// The popup ids of this frame's menus.
+    ids: Vec<Id>,
+}
+
+impl BarMenus {
+    fn ids_key() -> Id {
+        Id::new("oxtail-menu-bar-popups")
+    }
+
+    /// Starts the bar for this frame, with what the last frame learned.
+    fn begin(ctx: &Context) -> Self {
+        let ids: Vec<Id> = ctx
+            .data(|d| d.get_temp(Self::ids_key()))
+            .unwrap_or_default();
+        Self {
+            open: ids.into_iter().find(|&id| egui::Popup::is_id_open(ctx, id)),
+            ids: Vec::new(),
+        }
+    }
+
+    /// One top-level menu.
+    fn menu(&mut self, ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {
+        let resp = ui.menu_button(title, content).response;
+        let popup = egui::Popup::default_response_id(&resp);
+        self.ids.push(popup);
+        // Only another menu hands over: this one may just have been closed
+        // (a click on its title, Escape) with the pointer still on it.
+        if self.open.is_some_and(|o| o != popup)
+            && resp.hovered()
+            && !resp.clicked()
+            && !egui::Popup::is_id_open(ui.ctx(), popup)
+        {
+            // Closes the other menu; this one shows from the next frame.
+            egui::Popup::open_id(ui.ctx(), popup);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// Remembers the menus for the next frame.
+    fn end(self, ctx: &Context) {
+        ctx.data_mut(|d| d.insert_temp(Self::ids_key(), self.ids));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui_kittest::kittest::Queryable;
+
+    use super::*;
+
+    fn bar_harness() -> egui_kittest::Harness<'static> {
+        egui_kittest::Harness::new_ui(|ui| {
+            let mut bar = BarMenus::begin(ui.ctx());
+            egui::MenuBar::new().ui(ui, |ui| {
+                bar.menu(ui, "File", |ui| {
+                    ui.label("file item");
+                });
+                bar.menu(ui, "Edit", |ui| {
+                    ui.label("edit item");
+                });
+            });
+            bar.end(ui.ctx());
+        })
+    }
+
+    #[test]
+    fn pointing_at_another_title_switches_the_open_menu() {
+        let mut h = bar_harness();
+        h.run();
+        // Nothing is open: pointing at a title opens nothing.
+        h.get_by_label("Edit").hover();
+        h.run();
+        assert!(h.query_by_label("edit item").is_none());
+        h.get_by_label("File").click();
+        h.run();
+        assert!(h.query_by_label("file item").is_some());
+        h.get_by_label("Edit").hover();
+        h.run();
+        assert!(h.query_by_label("edit item").is_some());
+        assert!(h.query_by_label("file item").is_none());
+        // Escape closes the menu, although the pointer is on its title.
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(h.query_by_label("edit item").is_none());
+        h.run();
+        assert!(h.query_by_label("edit item").is_none());
+        h.get_by_label("Edit").click();
+        h.run();
+        assert!(h.query_by_label("edit item").is_some());
+        // And back.
+        h.get_by_label("File").hover();
+        h.run();
+        assert!(h.query_by_label("file item").is_some());
+        assert!(h.query_by_label("edit item").is_none());
+        // Clicking the open menu's title closes it, and it stays closed.
+        h.get_by_label("File").click();
+        h.run();
+        assert!(h.query_by_label("file item").is_none());
+        assert!(h.query_by_label("edit item").is_none());
+    }
 }
