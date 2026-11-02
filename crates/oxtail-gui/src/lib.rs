@@ -73,6 +73,7 @@ pub mod filter;
 pub mod find;
 pub mod goto;
 pub mod gototime;
+pub mod gpu;
 pub mod guistate;
 pub mod highlight;
 pub mod icon;

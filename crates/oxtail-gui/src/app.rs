@@ -1712,6 +1712,9 @@ pub fn native_options(
     // eframe queues two frames by default (high throughput); one keeps input
     // and drawing a frame closer together, which is what a viewer needs.
     options.wgpu_options.surface = eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY;
+    if let Ok(wanted) = std::env::var(crate::gpu::ADAPTER_ENV) {
+        crate::gpu::choose_adapter(&mut options, wanted);
+    }
     options
 }
 

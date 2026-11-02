@@ -174,5 +174,12 @@ opt-level = 2
 # painted again (vendor/eframe/src/native/skip_paint.rs). Moving the mouse
 # runs egui frames that draw nothing new; painting them took a CPU core with
 # software rasterizers. Upgrading eframe means re-applying the patch.
+#
+# wgpu-hal with one patch: on cache-coherent unified memory (WARP, the
+# software rasterizer of machines without a GPU, and most integrated GPUs) a
+# bind group's sampler index buffer is not put in write-combined memory, which
+# shaders running on the CPU read uncached for every texture sample
+# (vendor/wgpu-hal/OXTAIL-PATCH.md). Upgrading wgpu means re-applying it.
 [patch.crates-io]
 eframe = { path = "vendor/eframe" }
+wgpu-hal = { path = "vendor/wgpu-hal" }

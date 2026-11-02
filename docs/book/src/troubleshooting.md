@@ -21,15 +21,31 @@ Choose one with `--renderer glow` on the command line, or `renderer = "glow"` in
 `settings.toml`. Try `glow` first when:
 
 * you connect over **Remote Desktop**, VNC or X forwarding, or run in a virtual
-  machine without a GPU;
+  machine without a GPU (not on Windows, see below);
 * the window opens but stays black or white, or flickers;
 * `oxtail.log` mentions a `wgpu` failure at start.
 
-There is no separate software renderer. On a machine without a GPU, the operating
-system's or Mesa's software OpenGL (for example `llvmpipe` on Linux) is what
-makes `glow` work, so check that your system has OpenGL libraries installed. On Linux a system with neither
+OxTail has no software renderer of its own. On a machine without a GPU, Mesa's
+software OpenGL (for example `llvmpipe` on Linux) is what makes `glow` work, so
+check that your system has OpenGL libraries installed. Windows is the
+exception: without a GPU (a virtual machine, Remote Desktop) its OpenGL is
+version 1.1, too old for `glow`, and `wgpu` draws with WARP ("Microsoft Basic
+Render Driver"), the software rasterizer built into Windows. `oxtail.log` says
+"Software rasterizer detected" when that happens. On Linux a system with neither
 an X11 nor a Wayland session cannot show the window at all. OxTail is a desktop
 program.
+
+## High CPU use without a GPU
+
+With a software renderer every redraw is done by the CPU, so OxTail redraws
+only when the picture changes: moving the mouse over the log text costs
+almost nothing, hovering over buttons and scrolling cost a redraw each. Up to
+version 0.0.6, OxTail on WARP (Windows without a GPU) needed far more CPU per
+redraw than it should have, enough to use several cores while the mouse moved;
+later versions fix that.
+
+To reproduce a machine without a GPU on one that has one, set
+`OXTAIL_WGPU_ADAPTER=software` (see [the command line](cli.md#environment)).
 
 ## Files on network shares
 

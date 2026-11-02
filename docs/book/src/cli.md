@@ -72,3 +72,4 @@ with file arguments (status 2).
 | Variable | Meaning |
 |---|---|
 | `OXTAIL_LOG` | Log filter for OxTail's own diagnostics, in `tracing` `EnvFilter` syntax (`debug`, `oxtail_core=trace`). `RUST_LOG` is used if it is not set; the default is `info`. The log goes to standard error and to `oxtail.log` in the data folder. |
+| `OXTAIL_WGPU_ADAPTER` | The adapter the `wgpu` renderer draws with, instead of the first GPU: `software` (or `cpu`) for a software rasterizer such as WARP or `llvmpipe`, anything else for the first adapter whose name contains it, ignoring case (`intel`, `basic render`). If none matches, the window cannot be created; with the `auto` renderer OxTail then falls back to OpenGL as described in [Troubleshooting](troubleshooting.md#the-window-does-not-open-or-is-blank). `oxtail.log` lists the adapters there are. |
