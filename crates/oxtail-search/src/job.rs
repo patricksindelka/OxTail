@@ -1114,8 +1114,10 @@ mod tests {
         });
         let s = h.poll();
         assert!(s.done && s.truncated);
-        assert!(s.matches_found <= 5 + 10, "no new scans once full");
-        assert_eq!(h.next_after(390), Lookup::None);
+        // No new scans once full: nothing in the appended bytes (200..400).
+        // (How far the first scan overshot `max_matches` depends on how many
+        // chunks were in flight, i.e. on the number of cores.)
+        assert_eq!(h.next_after(199), Lookup::None);
     }
 
     #[test]
